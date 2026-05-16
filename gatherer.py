@@ -38,6 +38,9 @@ async def analyze_and_gather(
         }
     """
     prompt = _build_gather_prompt(state, code_context)
+    logger.info("gather: Issue #%d 分析中 (conv=%d, q=%d, code_ctx=%d files)",
+                 state.issue_number, len(state.conversation), state.questions_asked,
+                 len(code_context) if code_context else 0)
     result_text = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:

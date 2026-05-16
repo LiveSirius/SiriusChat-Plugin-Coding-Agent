@@ -150,7 +150,12 @@ class CodingAgentPlugin(PluginBase):
             logger.info("为已有 Issue #%d 新建 tracker（来自评论事件）", issue_number)
 
         register_comment_handler(_on_issue_comment)
-        logger.info("coding_agent v2.2 已就绪（event_bridge + tracker + comment handler）")
+
+        logger.info("coding_agent v2.2 启动完成 (monitor_repos=%d, effective=%d, tracker=on, "
+                    "auto_label=%s, auto_review=%s, auto_close=%s, max_q=%d)",
+                    len(self._monitor.repo_names), len(self._effective_repos),
+                    self._gh_config.auto_label, self._gh_config.auto_review,
+                    self._gh_config.auto_close_garbage, self._gh_config.max_questions)
 
     async def on_unload(self) -> None:
         if self._tracker:
