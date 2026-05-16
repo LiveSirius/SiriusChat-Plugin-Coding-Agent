@@ -186,3 +186,61 @@ async def apply_labels_to_issue(
             logger.info("创建新标签: %s (%s)", label_name, repo_full_name)
 
     return await add_labels_to_issue(repo_full_name, issue_number, labels, config)
+
+
+async def adjust_labels_for_issue(
+    issue_number: int,
+    repo_name: str,
+    title: str,
+    conversation: list[dict],
+    config: dict,
+    engine_proxy: Any,
+) -> list[str]:
+    """信息收集过程中，根据对话进展重新评估标签。
+
+    仅在对话中出现新信息（优先级变化、模块澄清等）时返回增量标签。
+    返回新增标签列表（不重复已有标签）。
+    """
+    recent_msgs = conversation[-6:] if len(conversation) > 6 else conversation
+    conv_text = "\n".join(
+        f"[{'用户' if m['role'] == 'user' else 'AI'}]: {m['content'][:500]}"
+        for m in recent_msgs
+    )
+
+    prompt = f"""根据 Issue 对话进展，判断是否需要补充标签。
+
+Issue #{issue_number}: {title}
+
+最近对话:
+{conv_text}
+
+可用标签: type:bug|feature|docs|question|refactor,
+priority:critical|high|medium|low, difficulty:easy|medium|hard,
+area:core|api|ui|docs|tests|config
+
+仅当新信息表明需要补充标签时才输出，否则输出空数组。
+输出严格 JSON:
+{{"add_labels": ["标签1", ...], "reason": "简短理由"}}"""
+
+    last_error = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            result = await engine_proxy.generate_raw(prompt, inject_persona=False)
+            data = json.loads(_extract_json_candidates(result.strip())[0])
+            labels = data.get("add_labels", [])
+            if isinstance(labels, list) and labels:
+                logger.info("Issue #%d 补充标签建议: %s", issue_number, labels)
+                valid = {"type:bug", "type:feature", "type:docs", "type:question", "type:refactor",
+                         "priority:critical", "priority:high", "priority:medium", "priority:low",
+                         "difficulty:easy", "difficulty:medium", "difficulty:hard",
+                         "area:core", "area:api", "area:ui", "area:docs", "area:tests", "area:config"}
+                return [l for l in labels if l in valid]
+            return []
+        except Exception as exc:
+            last_error = exc
+            if attempt < _MAX_RETRIES:
+                logger.debug("标签调整第 %d/%d 次失败: %s", attempt, _MAX_RETRIES, exc)
+            else:
+                logger.debug("标签调整 %d 次全部失败: %s", _MAX_RETRIES, exc)
+
+    return []

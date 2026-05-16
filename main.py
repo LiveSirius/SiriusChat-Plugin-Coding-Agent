@@ -8,6 +8,7 @@ import traceback
 from typing import Any
 
 from sirius_chat.github.event_bridge import (
+    register_comment_handler,
     register_issue_handler,
     register_pr_handler,
     set_issue_repos,
@@ -18,7 +19,8 @@ from sirius_chat.plugins.decorators import command
 from .commands import handle_gh_command
 from .config import GithubAgentConfig
 from .monitor_config import MonitorConfig
-from .webhook import handle_issue_opened, handle_pr_event
+from .tracker import IssueTracker
+from .webhook import handle_issue_opened, handle_pr_event, set_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -28,20 +30,20 @@ _plugin_dependencies = ["httpx", "GitPython"]
 class CodingAgentPlugin(PluginBase):
     _plugin_name = "coding_agent"
     _plugin_display_name = "编码助手"
-    _plugin_description = "GitHub Issue/PR 自动化管理 + Python 代码执行（事件由 github_monitor 驱动）"
-    _plugin_version = "2.1.0"
+    _plugin_description = "GitHub Issue/PR 自动化管理 + Python 代码执行（事件由 github_monitor 驱动，Issue 信息后台自主收集）"
+    _plugin_version = "2.2.0"
     _plugin_author = "SiriusChat"
 
     _plugin_parameters = [
-        {"name": "github_write_token", "type": "string", "description": "GitHub 写操作 PAT（fork/PR/标签/评论），留空则复用 monitor 读 Token"},
-        {"name": "active_repos", "type": "list", "description": "生效仓库（owner/repo，每行一个，留空=monitor中全部仓库生效）"},
-        {"name": "model", "type": "string", "description": "自定义 LLM 模型名（空=使用路由）"},
+        {"name": "github_write_token", "type": "string", "description": "GitHub 写操作 PAT"},
+        {"name": "active_repos", "type": "list", "description": "生效仓库（owner/repo，留空=monitor全部）"},
+        {"name": "model", "type": "string", "description": "自定义 LLM 模型名"},
         {"name": "max_retries", "type": "int", "description": "最大重试次数", "default": 3},
+        {"name": "max_questions", "type": "int", "description": "信息收集最大追问次数", "default": 3},
         {"name": "test_command", "type": "string", "description": "测试命令", "default": "pytest"},
         {"name": "auto_label", "type": "boolean", "description": "启用 Issue 自动标签", "default": True},
-        {"name": "auto_comment", "type": "boolean", "description": "启用 Issue 智能回复", "default": True},
         {"name": "auto_review", "type": "boolean", "description": "启用 PR 自动审阅", "default": True},
-        {"name": "auto_close_garbage", "type": "boolean", "description": "自动关闭无意义/垃圾 Issue 和 PR", "default": True},
+        {"name": "auto_close_garbage", "type": "boolean", "description": "自动关闭垃圾 Issue/PR", "default": True},
         {"name": "review_mode", "type": "string", "description": "PR 审阅深度: quick|deep", "default": "quick"},
         {"name": "console_viewer_enabled", "type": "boolean", "description": "弹出实时控制台窗口", "default": True},
         {"name": "console_viewer_keep_open", "type": "boolean", "description": "修复完成后保持窗口打开", "default": False},
@@ -51,13 +53,9 @@ class CodingAgentPlugin(PluginBase):
         self._gh_config: GithubAgentConfig | None = None
         self._monitor: MonitorConfig = MonitorConfig()
         self._effective_repos: list[str] = []
+        self._tracker: IssueTracker | None = None
 
     async def on_load(self) -> None:
-        """加载配置并注册事件桥接。
-
-        不自行启动 webhook 或轮询，所有事件由 github_monitor SKILL
-        通过 event_bridge 推送。
-        """
         self._gh_config = GithubAgentConfig.from_dict(self.ctx.config)
 
         if self.ctx.data_store:
@@ -67,7 +65,6 @@ class CodingAgentPlugin(PluginBase):
             logger.info("github_monitor 中未配置任何仓库，等待配置后重载")
             return
 
-        # 过滤生效仓库
         active = self._gh_config.active_repos
         if active:
             active_set = set(active)
@@ -78,14 +75,24 @@ class CodingAgentPlugin(PluginBase):
             self._effective_repos = list(self._monitor.repo_names)
 
         if not self._effective_repos:
-            logger.info("active_repos 过滤后无生效仓库，跳过事件注册")
+            logger.info("active_repos 过滤后无生效仓库，跳过")
             return
 
         set_issue_repos(set(self._effective_repos))
 
         config_dict = self._build_config_dict()
 
-        # 注册到 event_bridge（github_monitor 检测到事件时会回调）
+        # 初始化 IssueTracker（后台信息收集循环）
+        self._tracker = IssueTracker(
+            data_store=self.ctx.data_store,
+            config=config_dict,
+            engine_proxy=self.ctx.engine_proxy,
+            adapter=self.ctx.adapter,
+        )
+        set_tracker(self._tracker)
+        await self._tracker.start()
+
+        # 注册到 event_bridge
         async def _on_issue_opened(body: dict[str, Any], repo_name: str) -> None:
             if repo_name not in self._effective_repos:
                 return
@@ -101,11 +108,53 @@ class CodingAgentPlugin(PluginBase):
 
         register_issue_handler(_on_issue_opened)
         register_pr_handler(_on_pr_event)
-        logger.info("已注册 event_bridge 处理器，等待 github_monitor 事件推送")
+
+        # Issue 评论处理器：已有 tracker 则回灌评论，无 tracker 则新建
+        async def _on_issue_comment(body: dict[str, Any], repo_name: str) -> None:
+            if repo_name not in self._effective_repos:
+                return
+            issue = body.get("issue", {})
+            comment = body.get("comment", {})
+            if not issue or not comment:
+                return
+            issue_number = issue.get("number", 0)
+            if not issue_number:
+                return
+            # 查找已有 tracker
+            all_data = self.ctx.data_store.all() if hasattr(self.ctx.data_store, "all") else {}
+            from .tracker import _PREFIX
+            for key, raw in all_data.items():
+                if not key.startswith(_PREFIX):
+                    continue
+                data = raw if isinstance(raw, dict) else {}
+                if data.get("repo") == repo_name and data.get("issue_number") == issue_number:
+                    user_login = comment.get("user", {}).get("login", "unknown")
+                    comment_body = comment.get("body", "")
+                    if comment_body:
+                        data.setdefault("conversation", []).append({
+                            "role": "user", "content": f"@{user_login}: {comment_body}", "timestamp": __import__("time").time()
+                        })
+                        data["last_activity"] = __import__("time").time()
+                        data["status"] = "GATHERING_INFO"
+                        self.ctx.data_store.set(key, data)
+                        logger.info("回灌评论到 tracker: Issue #%d", issue_number)
+                    return
+            # 无 tracker → 新建
+            self._tracker.enqueue(
+                issue_number=issue_number,
+                repo=repo_name,
+                title=issue.get("title", "无标题"),
+                body=issue.get("body", ""),
+                labels=[l.get("name", "") for l in (issue.get("labels", []) or [])],
+            )
+            logger.info("为已有 Issue #%d 新建 tracker（来自评论事件）", issue_number)
+
+        register_comment_handler(_on_issue_comment)
+        logger.info("coding_agent v2.2 已就绪（event_bridge + tracker + comment handler）")
 
     async def on_unload(self) -> None:
-        """停止所有后台任务。"""
-        pass
+        if self._tracker:
+            await self._tracker.stop()
 
     def _build_config_dict(self) -> dict[str, Any]:
         if self._gh_config is None:
@@ -117,9 +166,9 @@ class CodingAgentPlugin(PluginBase):
             "github_write_token": self._gh_config.github_write_token,
             "admin_user_id": self._resolve_admin_id(),
             "model": self._gh_config.model,
+            "max_questions": self._gh_config.max_questions,
             "webhook_secret": self._monitor.webhook_secret,
             "auto_label": self._gh_config.auto_label,
-            "auto_comment": self._gh_config.auto_comment,
             "auto_review": self._gh_config.auto_review,
             "auto_close_garbage": self._gh_config.auto_close_garbage,
             "review_mode": self._gh_config.review_mode,
@@ -174,6 +223,7 @@ class CodingAgentPlugin(PluginBase):
         config_dict = {
             **self._build_config_dict(),
             "max_retries": self._gh_config.max_retries if self._gh_config else 3,
+            "max_questions": self._gh_config.max_questions if self._gh_config else 3,
             "test_command": self._gh_config.test_command if self._gh_config else "pytest",
         }
 

@@ -47,6 +47,21 @@ async def get_issue(repo: str, issue_number: int, config: dict[str, Any]) -> dic
         return result
 
 
+async def get_issue_comments(
+    repo: str, issue_number: int, config: dict[str, Any], *, since: str | None = None
+) -> list[dict[str, Any]]:
+    """获取 Issue 评论列表，可按 since (ISO timestamp) 增量拉取。"""
+    params: dict[str, Any] = {"per_page": 100, "sort": "created", "direction": "asc"}
+    if since:
+        params["since"] = since
+    async with GitHubClient(_token_for_repo(config, repo)) as client:
+        resp = await client.get(f"/repos/{repo}/issues/{issue_number}/comments", params=params)
+        if resp.status_code == 200:
+            return resp.json()
+        logger.error("获取 Issue #%d 评论失败: %d", issue_number, resp.status_code)
+        return []
+
+
 async def get_pr(repo: str, pr_number: int, config: dict[str, Any]) -> dict[str, Any] | None:
     async with GitHubClient(_token_for_repo(config, repo)) as client:
         result = await client.get_json(f"/repos/{repo}/pulls/{pr_number}")

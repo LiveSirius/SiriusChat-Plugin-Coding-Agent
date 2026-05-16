@@ -59,14 +59,28 @@ async def _handle_auto_command(
     data_store: Any,
     ctx: Any,
 ) -> str:
-    """启动自动修复。"""
-    raw = data_store.get(f"task_{task_id}")
+    """启动自动修复。数据从 tracker 中读取。"""
+    from .tracker import IssueTracker, IssueState, _PREFIX
+
+    raw = data_store.get(f"{_PREFIX}{task_id}")
+    if raw is None:
+        raw = data_store.get(f"task_{task_id}")
     if raw is None:
         return f"未找到任务 {task_id}"
 
-    task_data = _ensure_dict(raw)
-    task_data["status"] = "APPROVED"
-    data_store.set(f"task_{task_id}", task_data)
+    state_dict = raw if isinstance(raw, dict) else {}
+    task_data = {
+        "task_id": task_id,
+        "repo": state_dict.get("repo", ""),
+        "issue_number": state_dict.get("issue_number", 0),
+        "issue_title": state_dict.get("title", ""),
+        "issue_body": state_dict.get("body", ""),
+        "labels": state_dict.get("labels", []),
+        "status": "APPROVED",
+    }
+
+    state_dict["status"] = "FIXING"
+    data_store.set(f"{_PREFIX}{task_id}", state_dict)
 
     adapter = getattr(ctx, "adapter", None)
     asyncio.create_task(
@@ -81,28 +95,50 @@ async def _handle_auto_command(
 
 
 async def _handle_status_command(task_id: str, data_store: Any) -> str:
-    """查询任务状态。"""
-    raw = data_store.get(f"task_{task_id}")
+    """查询任务状态（优先从 tracker 读取）。"""
+    from .tracker import _PREFIX
+
+    raw = data_store.get(f"{_PREFIX}{task_id}")
+    if raw is None:
+        raw = data_store.get(f"task_{task_id}")
     if raw is None:
         return f"未找到任务 {task_id}"
-    task_data = _ensure_dict(raw)
+
+    state = raw if isinstance(raw, dict) else {"data": str(raw)}
+    status = state.get("status", "UNKNOWN")
+    status_desc = {
+        "GATHERING_INFO": "后台收集信息中",
+        "AWAITING_RESPONSE": f"等待用户回复（已追问 {state.get('questions_asked', 0)} 次）",
+        "READY": "信息就绪，等待修复指令",
+        "APPROVED": "已批准，等待执行",
+        "FIXING": "修复中",
+        "DONE": "已完成",
+        "CLOSED": "已关闭",
+        "PENDING_APPROVAL": "待审批",
+        "ABORTED": "已中止",
+    }
     return (
         f"任务 {task_id} 状态:\n"
-        f"Issue: #{task_data.get('issue_number', '?')} - {task_data.get('issue_title', '')}\n"
-        f"状态: {task_data.get('status', 'UNKNOWN')}\n"
-        f"仓库: {task_data.get('repo', 'N/A')}\n"
-        f"标签: {' '.join(task_data.get('labels', [])) or '无'}"
+        f"Issue: #{state.get('issue_number', '?')} - {state.get('title', '')}\n"
+        f"状态: {status_desc.get(status, status)}\n"
+        f"仓库: {state.get('repo', 'N/A')}\n"
+        f"标签: {' '.join(state.get('labels', [])) or '无'}\n"
+        f"理解: {state.get('gathered_summary', '—') or '—'}"
     )
 
 
 async def _handle_abort_command(task_id: str, data_store: Any) -> str:
     """中止任务。"""
-    raw = data_store.get(f"task_{task_id}")
+    from .tracker import _PREFIX
+
+    raw = data_store.get(f"{_PREFIX}{task_id}")
+    if raw is None:
+        raw = data_store.get(f"task_{task_id}")
     if raw is None:
         return f"未找到任务 {task_id}"
-    task_data = _ensure_dict(raw)
-    task_data["status"] = "ABORTED"
-    data_store.set(f"task_{task_id}", task_data)
+    state = raw if isinstance(raw, dict) else {"data": str(raw)}
+    state["status"] = "ABORTED"
+    data_store.set(f"{_PREFIX}{task_id}", state)
     return f"任务 {task_id} 已中止"
 
 

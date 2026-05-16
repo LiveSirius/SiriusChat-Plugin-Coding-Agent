@@ -26,6 +26,7 @@ class GithubAgentConfig:
     max_retries: int = 3
     test_command: str = "pytest"
     model: str = ""
+    max_questions: int = 3
 
     # ── 功能开关 ──
     auto_label: bool = True
@@ -46,6 +47,7 @@ class GithubAgentConfig:
             "max_retries": self.max_retries,
             "test_command": self.test_command,
             "model": self.model,
+            "max_questions": self.max_questions,
             "auto_label": self.auto_label,
             "auto_comment": self.auto_comment,
             "auto_review": self.auto_review,
@@ -64,6 +66,7 @@ class GithubAgentConfig:
             max_retries=int(data.get("max_retries", 3)),
             test_command=data.get("test_command", "pytest"),
             model=data.get("model", ""),
+            max_questions=int(data.get("max_questions", 3)),
             auto_label=_parse_bool(data.get("auto_label", True)),
             auto_comment=_parse_bool(data.get("auto_comment", True)),
             auto_review=_parse_bool(data.get("auto_review", True)),
