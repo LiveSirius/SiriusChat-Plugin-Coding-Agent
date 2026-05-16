@@ -110,10 +110,7 @@ DIFF:
     ]
 }}"""
 
-    if review_mode == "quick":
-        result_text = await engine_proxy.generate_text_analysis(system_prompt)
-    else:
-        result_text = await engine_proxy.generate_text(system_prompt)
+    result_text = await engine_proxy.generate_raw(system_prompt)
 
     try:
         review_result = json.loads(result_text.strip())

@@ -53,7 +53,7 @@ Issue 内容:
 
 请直接输出评论正文，不要包含任何前缀说明。"""
     try:
-        result = await engine_proxy.generate_text_analysis(prompt)
+        result = await engine_proxy.generate_raw(prompt)
         return result.strip()
     except Exception:
         issue_title = issue_data.get("title", "未知")

@@ -120,7 +120,17 @@ async def search_and_replace_block(file_path: str, old_block: str, new_block: st
     if count == 0:
         return f"错误：未在 {file_path} 中找到目标代码块"
     if count > 1:
-        return f"错误：目标代码块在 {file_path} 中出现 {count} 次（不唯一）。请提供更多上下文使匹配唯一。"
+        # 列出所有匹配位置便于 LLM 调整搜索块
+        positions = []
+        idx = 0
+        while True:
+            pos = content.find(old_block, idx)
+            if pos == -1:
+                break
+            line_no = content[:pos].count("\n") + 1
+            positions.append(f"L{line_no}")
+            idx = pos + 1
+        return f"错误：目标代码块在 {file_path} 中出现 {count} 次（不唯一）。匹配位置：{', '.join(positions)}。请提供更多上下文使匹配唯一。"
     new_content = content.replace(old_block, new_block, 1)
     Path(file_path).write_text(new_content, encoding="utf-8")
     return f"成功替换 {file_path} 中的代码块"

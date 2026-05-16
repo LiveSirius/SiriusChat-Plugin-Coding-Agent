@@ -84,7 +84,7 @@ Issue 内容:
     "reason_brief": "一句话理由"
 }}"""
     try:
-        result = await engine_proxy.generate_text_analysis(prompt)
+        result = await engine_proxy.generate_raw(prompt)
         label_data = json.loads(result.strip())
     except (json.JSONDecodeError, Exception):
         return _fallback_label_by_keywords(issue_data)
