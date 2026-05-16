@@ -259,6 +259,21 @@ async def add_labels_to_issue(
         return resp.status_code == 200
 
 
+async def remove_label_from_issue(
+    repo: str,
+    issue_number: int,
+    label_name: str,
+    config: dict[str, Any],
+) -> bool:
+    """从 Issue 移除单个标签。"""
+    from urllib.parse import quote
+    async with GitHubClient(_write_token_for_repo(config, repo)) as client:
+        resp = await client.delete(
+            f"/repos/{repo}/issues/{issue_number}/labels/{quote(label_name, safe='')}"
+        )
+        return resp.status_code in (200, 204)
+
+
 async def set_all_labels_to_issue(
     repo: str,
     issue_number: int,

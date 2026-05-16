@@ -200,8 +200,7 @@ async def adjust_labels_for_issue(
     """信息收集过程中，根据对话进展重新评估所有标签。
 
     返回该 Issue 当前应拥有的完整标签列表，或者 None（保持现有标签不变）。
-    调用方负责用 set_all_labels_to_issue 全量替换。
-    """
+    调用方负责对比 diff 后选择性增删。"""
     recent_msgs = conversation[-6:] if len(conversation) > 6 else conversation
     conv_text = "\n".join(
         f"[{'用户' if m['role'] == 'user' else 'AI'}]: {m['content'][:500]}"

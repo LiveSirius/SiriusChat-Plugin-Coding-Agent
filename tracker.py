@@ -263,10 +263,16 @@ class IssueTracker:
                     state.labels, self._config, self._engine_proxy,
                 )
                 if new_labels is not None and set(new_labels) != set(state.labels):
-                    from .api import set_all_labels_to_issue
-                    await set_all_labels_to_issue(state.repo, state.issue_number, new_labels, self._config)
+                    from .api import add_labels_to_issue, remove_label_from_issue
+                    to_add = [l for l in new_labels if l not in state.labels]
+                    to_remove = [l for l in state.labels if l not in new_labels]
+                    for label in to_remove:
+                        await remove_label_from_issue(state.repo, state.issue_number, label, self._config)
+                        logger.debug("Tracker: Issue #%d 移除标签 %s", state.issue_number, label)
+                    if to_add:
+                        await add_labels_to_issue(state.repo, state.issue_number, to_add, self._config)
                     state.labels = new_labels
-                    logger.info("Tracker: Issue #%d 标签更新 → %s", state.issue_number, new_labels)
+                    logger.info("Tracker: Issue #%d 标签变更: +%s -%s", state.issue_number, to_add, to_remove)
             except Exception as exc:
                 logger.debug("Tracker: Issue #%d 标签调整失败: %s", state.issue_number, exc)
 
