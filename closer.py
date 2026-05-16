@@ -1,7 +1,7 @@
 """垃圾 Issue/PR 检测与自动关闭。
 
 用 LLM 分析新提交的 Issue/PR，判断是否属于无意义或垃圾提交，
-若判定为垃圾则自动附带关闭理由并关闭。
+若判定为垃圾则生成人格化关闭评论并关闭。
 """
 
 from __future__ import annotations
@@ -16,22 +16,25 @@ logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 
 
+# ── 公开 API ──
+
+
 async def try_close_garbage_issue(
     issue_data: dict[str, Any],
     repo_name: str,
     engine_proxy: Any,
     config: dict[str, Any],
 ) -> bool:
-    """分析 Issue 是否为垃圾内容，若是则关闭。
+    """分析 Issue 是否为垃圾内容，若是则生成人格化评论并关闭。
 
-    Returns True 如果已关闭（即判定为垃圾），False 表示保留。
+    Returns True 如果已关闭，False 表示保留。
     """
-    prompt = _build_issue_garbage_prompt(issue_data)
-
     result_text = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            result_text = await engine_proxy.generate_raw(prompt, inject_persona=True)
+            result_text = await engine_proxy.generate_raw(
+                _build_issue_garbage_prompt(issue_data), inject_persona=False,
+            )
             result_text = result_text.strip()
             break
         except Exception as exc:
@@ -49,9 +52,9 @@ async def try_close_garbage_issue(
     if not parsed["is_garbage"]:
         return False
 
-    close_msg = parsed["reason"] or "此 Issue 经自动分析判定为无意义提交，已自动关闭。如有疑问请联系管理员。"
+    close_msg = await _generate_close_comment(issue_data, repo_name, engine_proxy, parsed["reason"])
     await close_issue(repo_name, issue_data["number"], close_msg, config)
-    logger.info("Issue #%d 已自动关闭（垃圾判定: %s）", issue_data["number"], parsed["reason"])
+    logger.info("Issue #%d 已自动关闭", issue_data["number"])
     return True
 
 
@@ -61,16 +64,16 @@ async def try_close_garbage_pr(
     engine_proxy: Any,
     config: dict[str, Any],
 ) -> bool:
-    """分析 PR 是否为垃圾内容，若是则关闭。
+    """分析 PR 是否为垃圾内容，若是则生成人格化评论并关闭。
 
     Returns True 如果已关闭，False 表示保留。
     """
-    prompt = _build_pr_garbage_prompt(pr_data)
-
     result_text = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            result_text = await engine_proxy.generate_raw(prompt, inject_persona=True)
+            result_text = await engine_proxy.generate_raw(
+                _build_pr_garbage_prompt(pr_data), inject_persona=False,
+            )
             result_text = result_text.strip()
             break
         except Exception as exc:
@@ -88,10 +91,68 @@ async def try_close_garbage_pr(
     if not parsed["is_garbage"]:
         return False
 
-    close_msg = parsed["reason"] or "此 PR 经自动分析判定为无意义提交，已自动关闭。如有疑问请联系管理员。"
+    close_msg = await _generate_close_comment(pr_data, repo_name, engine_proxy, parsed["reason"])
     await close_pr(repo_name, pr_data["number"], close_msg, config)
-    logger.info("PR #%d 已自动关闭（垃圾判定: %s）", pr_data["number"], parsed["reason"])
+    logger.info("PR #%d 已自动关闭", pr_data["number"])
     return True
+
+
+# ── 人格化关闭评论生成 ──
+
+
+async def _generate_close_comment(
+    submission_data: dict[str, Any],
+    repo_name: str,
+    engine_proxy: Any,
+    reason: str,
+) -> str:
+    """生成人格化关闭评论（inject_persona=True）。
+
+    仿 commenter.generate_issue_comment 的模式：
+    - 感谢提交 ✓
+    - 说明不符合项目要求 ✓
+    - 关闭通知 ✓
+    - 整体语气由 persona 注入决定 ✓
+    """
+    kind = "Pull Request" if "pull_request" in submission_data else "Issue"
+    title = submission_data.get("title", "")
+    body = submission_data.get("body", "")[:2000] or "（无内容）"
+
+    prompt = f"""你正在关闭一个不合适的 GitHub {kind}。请以你的角色身份撰写一条公开关闭评论。
+
+{kind} #{submission_data.get('number', '?')}: {title}
+
+提交内容:
+{body}
+
+自动判定关闭原因: {reason}
+
+关闭评论要求：
+1. 感谢用户提交，语气友好但坚定
+2. 简明说明此提交不符合项目范围/质量标准
+3. 提示如有异议可联系管理员
+4. 整体语气必须与你的角色身份完全一致
+5. 长度控制在 80-150 字
+6. 输出纯文本（Markdown 格式，不要代码块包裹）
+
+请直接输出关闭评论正文，不要包含任何前缀说明。"""
+
+    last_error = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            result = await engine_proxy.generate_raw(prompt, inject_persona=True)
+            return result.strip()
+        except Exception as exc:
+            last_error = exc
+            if attempt < _MAX_RETRIES:
+                logger.info("生成关闭评论第 %d/%d 次失败，重试中: %s", attempt, _MAX_RETRIES, exc)
+            else:
+                logger.error("生成关闭评论 %d 次全部失败", _MAX_RETRIES)
+
+    return reason or "此提交经自动分析判定为不适用，已自动关闭。"
+
+
+# ── 垃圾判定 Prompt ──
 
 
 def _build_issue_garbage_prompt(issue_data: dict[str, Any]) -> str:
@@ -150,5 +211,5 @@ def _parse_garbage_result(text: str) -> dict[str, Any]:
                     }
             except (_json.JSONDecodeError, ValueError):
                 continue
-    logger.warning("垃圾判定 JSON 解析失败，保留 Issue/PR: %s", text[:200])
+    logger.warning("垃圾判定 JSON 解析失败，保留: %s", text[:200])
     return {"is_garbage": False, "reason": ""}
