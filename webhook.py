@@ -79,6 +79,14 @@ async def webhook_handler(
     event_type = request.headers.get("X-GitHub-Event", "")
     body = await request.json()
 
+    repo_name = body.get("repository", {}).get("full_name", "")
+    repos = config.get("repos", [])
+
+    # 校验仓库是否在绑定列表中
+    if repos and repo_name not in repos:
+        logger.debug("Webhook 仓库 %s 不在绑定列表中，忽略", repo_name)
+        return web.json_response({"status": "ignored", "reason": "repo not in bindings"})
+
     # ── Issue 事件 ──
     if event_type == "issues" and body.get("action") == "opened":
         await _handle_issue_opened(body, config, adapter, engine_proxy, data_store)

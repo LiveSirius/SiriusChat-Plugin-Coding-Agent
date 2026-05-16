@@ -22,8 +22,27 @@ class CodingAgentPlugin(PluginBase):
     _plugin_name = "coding_agent"
     _plugin_display_name = "编码助手"
     _plugin_description = "GitHub Issue/PR 自动化管理 + Python 代码执行"
-    _plugin_version = "1.0.0"
+    _plugin_version = "1.1.0"
     _plugin_author = "SiriusChat"
+
+    _plugin_parameters = [
+        {"name": "github_pat", "type": "string", "description": "GitHub Personal Access Token", "required": True},
+        {"name": "github_username", "type": "string", "description": "GitHub 用户名", "required": True},
+        {"name": "admin_user_id", "type": "string", "description": "管理员 QQ 号", "required": True},
+        {"name": "repos", "type": "list", "description": "绑定的仓库列表，每行一个，格式 owner/repo", "required": True},
+        {"name": "webhook_port", "type": "int", "description": "Webhook 监听端口（0=自动分配）", "default": 0},
+        {"name": "webhook_secret", "type": "string", "description": "Webhook HMAC 签名密钥（可选）"},
+        {"name": "webhook_public_url", "type": "string", "description": "Webhook 公网地址（如 ngrok URL）"},
+        {"name": "model", "type": "string", "description": "自定义 LLM 模型名（空=使用路由）"},
+        {"name": "max_retries", "type": "int", "description": "最大重试次数", "default": 3},
+        {"name": "test_command", "type": "string", "description": "测试命令", "default": "pytest"},
+        {"name": "auto_label", "type": "boolean", "description": "启用 Issue 自动标签", "default": True},
+        {"name": "auto_comment", "type": "boolean", "description": "启用 Issue 智能回复", "default": True},
+        {"name": "auto_review", "type": "boolean", "description": "启用 PR 自动审阅", "default": True},
+        {"name": "review_mode", "type": "string", "description": "PR 审阅深度: quick|deep", "default": "quick"},
+        {"name": "console_viewer_enabled", "type": "boolean", "description": "弹出实时控制台窗口", "default": True},
+        {"name": "console_viewer_keep_open", "type": "boolean", "description": "修复完成后保持窗口打开", "default": False},
+    ]
 
     def __init__(self) -> None:
         self._gh_config: GithubAgentConfig | None = None
@@ -31,31 +50,23 @@ class CodingAgentPlugin(PluginBase):
         self._webhook_port: int = 0
 
     async def on_load(self) -> None:
-        """加载配置并启动 Webhook 服务。"""
-        settings = self.ctx.data_store.get("github_agent_config")
-        if settings:
-            self._gh_config = GithubAgentConfig.from_dict(settings)
-        else:
-            self._gh_config = GithubAgentConfig()
+        """加载配置并启动 Webhook 服务。
 
-        if self._gh_config.github_pat:
-            config_dict = {
-                "github_pat": self._gh_config.github_pat,
-                "github_username": self._gh_config.github_username,
-                "admin_user_id": self._gh_config.admin_user_id,
-                "repo": self._gh_config.repo,
-                "model": self._gh_config.model,
-                "webhook_secret": self._gh_config.webhook_secret,
-                "auto_label": self._gh_config.auto_label,
-                "auto_comment": self._gh_config.auto_comment,
-                "auto_review": self._gh_config.auto_review,
-                "review_mode": self._gh_config.review_mode,
-                "workspace_dir": str(self._gh_config.workspace_dir),
-                "webhook_public_url": self._gh_config.webhook_public_url,
-                "console_viewer_enabled": self._gh_config.console_viewer_enabled,
-                "console_viewer_keep_open": self._gh_config.console_viewer_keep_open,
-            }
+        配置优先级：ctx.config（WebUI 设置） > data_store（旧兼容）
+        """
+        # 从 ctx.config 读取 WebUI 设置（新方式）
+        self._gh_config = GithubAgentConfig.from_dict(self.ctx.config)
 
+        # 如果 ctx.config 中没有关键配置，回退到 data_store（旧兼容）
+        if not self._gh_config.github_pat and self.ctx.data_store:
+            old_settings = self.ctx.data_store.get("github_agent_config")
+            if old_settings:
+                self._gh_config = GithubAgentConfig.from_dict(old_settings)
+                # 迁移到 ctx.config 对应的 _config.json（通过 WebUI API）
+                logger.info("从旧 data_store 迁移 github_agent_config，请在 WebUI 插件设置中保存新配置")
+
+        if self._gh_config.github_pat and self._gh_config.repos:
+            config_dict = self._build_config_dict()
             try:
                 runner, port = await start_webhook_server(
                     host="127.0.0.1",
@@ -79,6 +90,27 @@ class CodingAgentPlugin(PluginBase):
                 logger.info("Webhook 服务已停止")
             except Exception as exc:
                 logger.warning("停止 Webhook 服务时出错: %s", exc)
+
+    def _build_config_dict(self) -> dict[str, Any]:
+        """从 GithubAgentConfig 构建传递给子模块的配置字典。"""
+        if self._gh_config is None:
+            return {}
+        return {
+            "github_pat": self._gh_config.github_pat,
+            "github_username": self._gh_config.github_username,
+            "admin_user_id": self._gh_config.admin_user_id,
+            "repos": self._gh_config.repos,
+            "model": self._gh_config.model,
+            "webhook_secret": self._gh_config.webhook_secret,
+            "auto_label": self._gh_config.auto_label,
+            "auto_comment": self._gh_config.auto_comment,
+            "auto_review": self._gh_config.auto_review,
+            "review_mode": self._gh_config.review_mode,
+            "workspace_dir": str(self._gh_config.workspace_dir),
+            "webhook_public_url": self._gh_config.webhook_public_url,
+            "console_viewer_enabled": self._gh_config.console_viewer_enabled,
+            "console_viewer_keep_open": self._gh_config.console_viewer_keep_open,
+        }
 
     @command(
         "py",
@@ -110,7 +142,7 @@ class CodingAgentPlugin(PluginBase):
         patterns=["/gh"],
         render_mode="direct",
         description="GitHub Agent 指令：管理 Issue 修复、PR 审阅",
-        examples=["/gh <task_id> auto", "/gh review 1 quick"],
+        examples=["/gh <task_id> auto", "/gh review <repo_index> <pr_number> [quick|deep]"],
     )
     async def github_agent(self, command_args: str = "") -> PluginResponse:
         """处理 GitHub Agent 相关指令。"""
@@ -118,17 +150,9 @@ class CodingAgentPlugin(PluginBase):
             return PluginResponse.fail("GitHub Agent 未配置，请先设置 github_pat")
 
         config_dict = {
-            "github_pat": self._gh_config.github_pat,
-            "github_username": self._gh_config.github_username,
-            "admin_user_id": self._gh_config.admin_user_id,
-            "repo": self._gh_config.repo,
+            **self._build_config_dict(),
             "max_retries": self._gh_config.max_retries,
             "test_command": self._gh_config.test_command,
-            "model": self._gh_config.model,
-            "workspace_dir": str(self._gh_config.workspace_dir),
-            "webhook_secret": self._gh_config.webhook_secret,
-            "console_viewer_enabled": self._gh_config.console_viewer_enabled,
-            "console_viewer_keep_open": self._gh_config.console_viewer_keep_open,
         }
 
         result = await handle_gh_command(
