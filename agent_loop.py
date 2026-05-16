@@ -85,9 +85,22 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     return task_dir
 
 
-def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str:
+def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path, config: dict | None = None) -> str:
     """构建 Agent 的系统 Prompt。包含角色定义和可用工具说明。"""
-    return f"""你是一名资深软件工程师，正在通过 tool calling 修复一个 GitHub Issue。
+    persona = (config or {}).get("persona_info", {})
+    persona_section = ""
+    if persona.get("name"):
+        persona_section = f"\n你当前的角色身份是「{persona['name']}」，请以 {persona['name']} 的身份和风格来完成修复。"
+        if persona.get("persona_summary"):
+            persona_section += f"\n角色简介：{persona['persona_summary']}"
+        if persona.get("personality_traits"):
+            traits = "、".join(persona["personality_traits"]) if isinstance(persona["personality_traits"], list) else persona["personality_traits"]
+            persona_section += f"\n性格特征：{traits}"
+        if persona.get("communication_style"):
+            persona_section += f"\n沟通风格：{persona['communication_style']}"
+        persona_section += "\n\n你的代码修改风格和问题分析方式应体现该角色的特点。PR 描述、commit message 的措辞也要符合角色风格。\n"
+
+    return f"""你是一名资深软件工程师，正在通过 tool calling 修复一个 GitHub Issue。{persona_section}
 
 工作区路径：{workspace_dir}
 
@@ -140,7 +153,7 @@ async def agentic_loop(
     """核心自治修复循环。返回状态码。"""
     max_retries = config.get("max_retries", 3)
 
-    system_prompt = build_system_prompt(tool_registry, workspace_dir)
+    system_prompt = build_system_prompt(tool_registry, workspace_dir, config)
     user_message = f"Issue #{issue_data.get('number', '?')}: {issue_data.get('title', '')}\n\n{issue_data.get('body', '')}"
 
     messages = [

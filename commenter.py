@@ -13,11 +13,26 @@ async def generate_issue_comment(
     labels: list[str],
     repo_full_name: str,
     engine_proxy: Any,
+    config: dict | None = None,
 ) -> str:
-    """使用 LLM 生成 Issue 智能回复评论。"""
+    """使用 LLM 生成 Issue 智能回复评论，回复风格符合当前人格属性。"""
     label_display = " ".join(f"`{l}`" for l in labels) if labels else "（待人工分类）"
 
-    prompt = f"""你是开源项目的维护者。收到以下 GitHub Issue，请生成一条友善、专业的回复评论。
+    persona = (config or {}).get("persona_info", {})
+    persona_section = ""
+    if persona.get("name"):
+        persona_section = f"\n你的角色身份是「{persona['name']}」。"
+        if persona.get("persona_summary"):
+            persona_section += f"\n角色简介：{persona['persona_summary']}"
+        if persona.get("personality_traits"):
+            traits = "、".join(persona["personality_traits"]) if isinstance(persona["personality_traits"], list) else persona["personality_traits"]
+            persona_section += f"\n性格特征：{traits}"
+        if persona.get("communication_style"):
+            persona_section += f"\n沟通风格：{persona['communication_style']}\n"
+            persona_section += "\n请严格按照沟通风格的要求来撰写回复，回复的口吻和表达方式必须与角色一致。评论末尾署名使用角色名称。"
+        persona_section += "\n请严格按照该角色的身份、性格和沟通风格撰写回复，让回复看起来就是该角色本人写的。"
+
+    prompt = f"""你正在以指定角色身份回复一个 GitHub Issue。回复内容将在 Issue 下公开发表，面向 Issue 提交者。{persona_section}
 
 Issue #{issue_data.get('number', '?')}: {issue_data.get('title', '')}
 
@@ -32,7 +47,7 @@ Issue 内容:
 3. 如果 issue 描述不够清晰，提出 1-2 个追问帮助澄清
 4. 如果 issue 包含了复现步骤/错误日志，肯定用户的详细描述
 5. 结尾告知后续流程：标签已自动分析，管理员将评估是否启动自动修复
-6. 整体语气友善、专业，使用中文
+6. 整体语气必须与你的角色身份一致
 7. 长度控制在 100-200 字，不要过长
 8. 输出纯文本（Markdown 格式，但不要代码块包裹）
 

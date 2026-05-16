@@ -49,7 +49,20 @@ async def auto_label_issue(
     通过 EngineProxy.generate_text_analysis() 调用轻量分析模型，
     输出结构化 JSON 供程序解析和应用。
     """
-    prompt = f"""你是一个 Issue 分类助手。分析以下 GitHub Issue，输出 JSON 格式的标签建议。
+    persona = config.get("persona_info", {})
+    persona_section = ""
+    if persona.get("name"):
+        persona_section = (
+            f"\n你当前的角色身份是「{persona['name']}」，请以 {persona['name']} 的视角来分析这个 Issue。"
+        )
+        if persona.get("personality_traits"):
+            traits = "、".join(persona["personality_traits"]) if isinstance(persona["personality_traits"], list) else persona["personality_traits"]
+            persona_section += f"\n{persona['name']}的性格特征：{traits}"
+        if persona.get("communication_style"):
+            persona_section += f"\n{persona['name']}的沟通风格：{persona['communication_style']}"
+
+    prompt = f"""你是一个 Issue 分类助手，正在以指定角色身份分析 Issue。分析结果应符合该角色的认知视角。
+{persona_section}
 
 严格遵守以下标签命名规范：
 - 类型标签: type:bug / type:feature / type:docs / type:question / type:refactor

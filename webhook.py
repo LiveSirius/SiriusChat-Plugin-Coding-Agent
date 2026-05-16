@@ -122,7 +122,7 @@ async def _handle_issue_opened(
     # 2. 智能回复
     if config.get("auto_comment", True):
         try:
-            comment = await generate_issue_comment(issue_data, labels, repo_name, engine_proxy)
+            comment = await generate_issue_comment(issue_data, labels, repo_name, engine_proxy, config)
             await post_comment(repo_name, issue_data["number"], comment, config)
             logger.info("Issue #%d 智能回复已发表", issue_data["number"])
         except Exception as exc:
