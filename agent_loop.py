@@ -52,10 +52,11 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     task_dir = workspace_root / f"task_{issue_number}"
     task_dir.mkdir(parents=True, exist_ok=True)
 
+    from .api import _resolve_github_username
     from git import Repo
 
-    # github_username 从仓库 owner 自动推导
-    username = repo_name.split("/")[0] if "/" in repo_name else config.get("github_username", "")
+    # github_username 从配置显式指定，空则 fallback 到仓库 owner
+    username = _resolve_github_username(repo_name, config)
 
     # 1. Fork（幂等）
     await fork_repo(repo_name, config)
@@ -416,12 +417,13 @@ async def _finalize_and_create_pr(
 ) -> str:
     """提交代码并创建 Pull Request。返回 PR URL。"""
     from git import Repo
+    from .api import _resolve_github_username
 
     repo = Repo(workspace_dir)
     repo.git.add(".")
 
-    # 设置仓库级 git 用户身份，确保 GitHub 将提交归因于 AI 账户而非本地用户
-    username = repo_name.split("/")[0] if "/" in repo_name else config.get("github_username", "")
+    # 设置仓库级 git 用户身份，确保 GitHub 将提交归因于正确账户
+    username = _resolve_github_username(repo_name, config)
     with repo.config_writer() as cw:
         cw.set_value("user", "name", username)
         cw.set_value("user", "email", f"{username}@users.noreply.github.com")

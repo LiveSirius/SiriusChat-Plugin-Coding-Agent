@@ -34,6 +34,17 @@ def _write_token_for_repo(config: dict[str, Any]) -> str:
     return config.get("github_write_token", "")
 
 
+def _resolve_github_username(repo: str, config: dict[str, Any]) -> str:
+    """解析 GitHub 用户名。
+
+    优先级：配置 github_username > 仓库 owner（repo.split("/")[0]）> 空。
+    """
+    explicit = config.get("github_username", "")
+    if explicit:
+        return explicit
+    return repo.split("/")[0] if "/" in repo else ""
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Issue / PR 查询
 # ═══════════════════════════════════════════════════════════════════════
@@ -125,7 +136,7 @@ async def fork_repo(repo: str, config: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def sync_fork(repo: str, config: dict[str, Any]) -> bool:
-    username = repo.split("/")[0] if "/" in repo else config.get("github_username", "")
+    username = _resolve_github_username(repo, config)
     default_branch = await get_default_branch(repo, config)
     async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(

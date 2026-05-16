@@ -35,7 +35,8 @@ class CodingAgentPlugin(PluginBase):
     _plugin_author = "SiriusChat"
 
     _plugin_parameters = [
-        {"name": "github_write_token", "type": "string", "description": "GitHub 写操作 PAT"},
+        {"name": "github_write_token", "type": "string", "description": "GitHub PAT（fork/PR/标签/评论），留空复用 monitor token"},
+        {"name": "github_username", "type": "string", "description": "GitHub 用户名（生成 git 提交者身份，留空=仓库 owner）"},
         {"name": "active_repos", "type": "list", "description": "生效仓库（owner/repo，留空=monitor全部）"},
         {"name": "model", "type": "string", "description": "自定义 LLM 模型名"},
         {"name": "max_retries", "type": "int", "description": "最大重试次数", "default": 3},
@@ -169,6 +170,7 @@ class CodingAgentPlugin(PluginBase):
             "_monitor": self._monitor,
             "active_repos": self._effective_repos,
             "github_write_token": self._gh_config.github_write_token,
+            "github_username": self._gh_config.github_username,
             "admin_user_id": self._resolve_admin_id(),
             "model": self._gh_config.model,
             "max_questions": self._gh_config.max_questions,
