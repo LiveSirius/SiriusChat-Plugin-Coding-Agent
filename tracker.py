@@ -278,7 +278,7 @@ class IssueTracker:
 
         # 多轮信息收集：最多 2 轮代码查看 + 1 轮最终决策
         for round_num in range(1, 4):
-            result = await analyze_and_gather(state, self._engine_proxy, code_context or None)
+            result = await analyze_and_gather(state, self._engine_proxy, code_context or None, model=self._config.get("model", ""))
 
             # 请求查看文件 → 获取后重新分析
             look_at = result.get("look_at_files", [])
@@ -350,6 +350,9 @@ class IssueTracker:
         logger.info("Tracker: Issue #%d 已关闭 (reason=%s)", state.issue_number, reason)
 
         admin_id = self._config.get("admin_user_id", "")
+        if not admin_id:
+            from .webhook import _resolve_admin_id
+            admin_id = _resolve_admin_id(self._adapter)
         if admin_id and self._adapter:
             try:
                 prompt = f"""以你的角色身份通知管理员一个 Issue 已自动关闭。
@@ -358,7 +361,7 @@ Issue #{state.issue_number}: {state.title}
 原因: {reason}
 
 用角色口吻简述，1句话。"""
-                persona_msg = await self._engine_proxy.generate_raw(prompt, inject_persona=True)
+                persona_msg = await self._engine_proxy.generate_raw(prompt, inject_persona=True, model=self._config.get("model", ""))
                 msg = persona_msg.strip() or f"Issue #{state.issue_number} 已自动关闭: {reason}"
             except Exception:
                 msg = f"Issue #{state.issue_number}: {state.title} 已自动关闭\n仓库: {state.repo}\n原因: {reason}"
@@ -374,13 +377,14 @@ Issue #{state.issue_number}: {state.title}
 要问的核心问题: {base_question}
 
 请用你的角色口吻重新表述这个问题，保持友好、自然。只输出最终问题正文。"""
-            result = await self._engine_proxy.generate_raw(prompt, inject_persona=True)
+            result = await self._engine_proxy.generate_raw(prompt, inject_persona=True, model=self._config.get("model", ""))
             return result.strip() or base_question
         except Exception:
             return base_question
 
     async def _notify_developer(self, state: IssueState, result: dict[str, Any]) -> None:
-        admin_id = self._config.get("admin_user_id", "")
+        from .webhook import _resolve_admin_id
+        admin_id = _resolve_admin_id(self._adapter)
         if not admin_id or not self._adapter:
             logger.warning("Tracker: Issue #%d 就绪但无法通知 developer (admin=%s adapter=%s)",
                            state.issue_number, bool(admin_id), bool(self._adapter))
@@ -395,7 +399,7 @@ Issue #{state.issue_number}: {state.title}
 任务ID: {state.task_id}
 
 用你的角色口吻告诉管理员这个 Issue 已就绪，回复 /gh {state.task_id} auto 即可启动修复。1-2句话。"""
-            persona_msg = await self._engine_proxy.generate_raw(prompt, inject_persona=True)
+            persona_msg = await self._engine_proxy.generate_raw(prompt, inject_persona=True, model=self._config.get("model", ""))
             msg = persona_msg.strip() or f"[READY] Issue #{state.issue_number} 信息已就绪，回复 /gh {state.task_id} auto 启动修复"
         except Exception:
             msg = f"[READY] Issue #{state.issue_number}: {state.title}\n仓库: {state.repo}\n回复 /gh {state.task_id} auto 启动自动修复"

@@ -105,7 +105,7 @@ Issue 内容:
     last_error = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            result = await engine_proxy.generate_raw(prompt, inject_persona=True)
+            result = await engine_proxy.generate_raw(prompt, inject_persona=True, json_mode=True)
             label_data = await _parse_label_data(result)
             return _build_label_list(label_data)
         except Exception as exc:
@@ -225,7 +225,7 @@ area:core|api|ui|docs|tests|config
     last_error = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            result = await engine_proxy.generate_raw(prompt, inject_persona=False)
+            result = await engine_proxy.generate_raw(prompt, inject_persona=False, json_mode=True)
             data = json.loads(_extract_json_candidates(result.strip())[0])
             labels = data.get("add_labels", [])
             if isinstance(labels, list) and labels:

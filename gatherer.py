@@ -19,6 +19,7 @@ async def analyze_and_gather(
     state: Any,
     engine_proxy: Any,
     code_context: dict[str, str] | None = None,
+    model: str = "",
 ) -> dict[str, Any]:
     """分析 Issue 对话，判定下一步动作。
 
@@ -44,7 +45,7 @@ async def analyze_and_gather(
     result_text = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            result_text = await engine_proxy.generate_raw(prompt, inject_persona=False)
+            result_text = await engine_proxy.generate_raw(prompt, inject_persona=False, model=model, json_mode=True)
             result_text = result_text.strip()
             break
         except Exception as exc:
@@ -115,6 +116,51 @@ Issue #{state.issue_number}: {state.title}
 
 def _parse_gather_result(text: str) -> dict[str, Any] | None:
     import json as _json
+
+    stripped = text.strip()
+
+    # 1. 尝试提取 markdown 代码块中的 JSON
+    if "```json" in stripped:
+        start = stripped.index("```json") + 7
+        end = stripped.find("```", start)
+        if end > start:
+            stripped = stripped[start:end].strip()
+    elif "```" in stripped:
+        start = stripped.index("```") + 3
+        end = stripped.find("```", start)
+        if end > start:
+            stripped = stripped[start:end].strip()
+
+    # 2. 尝试将整个文本解析为 JSON（多行 JSON 对象）
+    if stripped.startswith("{"):
+        # 找到最外层闭合的 }
+        depth = 0
+        end_idx = -1
+        for i, ch in enumerate(stripped):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_idx = i + 1
+                    break
+        if end_idx > 0:
+            candidate = stripped[:end_idx]
+            try:
+                data = _json.loads(candidate)
+                if isinstance(data, dict) and "action" in data:
+                    return {
+                        "action": str(data.get("action", "ask")),
+                        "understanding": str(data.get("understanding", "")),
+                        "approach": str(data.get("approach", "")),
+                        "question": str(data.get("question", "")),
+                        "close_reason": str(data.get("close_reason", "")),
+                        "look_at_files": _parse_file_list(data.get("look_at_files", [])),
+                    }
+            except (_json.JSONDecodeError, ValueError):
+                pass
+
+    # 3. 逐行回退（单行 JSON）
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("{"):
