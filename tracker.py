@@ -260,7 +260,7 @@ class IssueTracker:
                 from .labeler import adjust_labels_for_issue
                 new_labels = await adjust_labels_for_issue(
                     state.issue_number, state.repo, state.title, state.conversation,
-                    self._config, self._engine_proxy,
+                    state.labels, self._config, self._engine_proxy,
                 )
                 if new_labels:
                     from .api import add_labels_to_issue
@@ -372,15 +372,19 @@ Issue #{state.issue_number}: {state.title}
             await self._adapter.send_private_message(admin_id, msg)
 
     async def _persona_question(self, state: IssueState, base_question: str) -> str:
-        """将功能性追问转为角色化表达（inject_persona=True）。"""
+        """将功能性追问转为角色化表达（保留核心问题，避免答非所问）。"""
         try:
-            prompt = f"""你正在 GitHub Issue 下以你的角色身份追问用户一个问题。
+            prompt = f"""你正在 GitHub Issue 下以你的角色身份追问用户一个问题。你必须确保最终输出中明确包含核心问题的实质内容。
 
 Issue #{state.issue_number}: {state.title}
 
-要问的核心问题: {base_question}
+核心问题（必须回答）: {base_question}
 
-请用你的角色口吻重新表述这个问题，保持友好、自然。只输出最终问题正文。"""
+要求：
+1. 用角色口吻开场（1句轻快问候即可）
+2. 然后自然地引出核心问题，不得改变问题的实质含义
+3. 整体保持友好、自然，50-120字
+4. 禁止仅输出角色扮演内容而不包含核心问题"""
             result = await self._engine_proxy.generate_raw(prompt, inject_persona=True, model=self._config.get("model", ""))
             return result.strip() or base_question
         except Exception:

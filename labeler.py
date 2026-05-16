@@ -193,6 +193,7 @@ async def adjust_labels_for_issue(
     repo_name: str,
     title: str,
     conversation: list[dict],
+    existing_labels: list[str],
     config: dict,
     engine_proxy: Any,
 ) -> list[str]:
@@ -206,10 +207,13 @@ async def adjust_labels_for_issue(
         f"[{'用户' if m['role'] == 'user' else 'AI'}]: {m['content'][:500]}"
         for m in recent_msgs
     )
+    existing_str = ", ".join(existing_labels) if existing_labels else "（无）"
 
     prompt = f"""根据 Issue 对话进展，判断是否需要补充标签。
 
 Issue #{issue_number}: {title}
+
+已有标签: {existing_str}
 
 最近对话:
 {conv_text}
@@ -218,7 +222,12 @@ Issue #{issue_number}: {title}
 priority:critical|high|medium|low, difficulty:easy|medium|hard,
 area:core|api|ui|docs|tests|config
 
-仅当新信息表明需要补充标签时才输出，否则输出空数组。
+重要规则：
+1. 不要添加与已有标签功能重复的标签
+2. 只有当对话中出现新信息明确指向某个新标签时才添加
+3. 如果已有标签已经足够覆盖当前对话内容，输出空数组
+4. 同一维度（type/priority/difficulty）已有标签时不再添加同维度标签
+
 输出严格 JSON:
 {{"add_labels": ["标签1", ...], "reason": "简短理由"}}"""
 
