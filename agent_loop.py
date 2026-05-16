@@ -418,10 +418,15 @@ async def _finalize_and_create_pr(
     repo = Repo(workspace_dir)
     repo.git.add(".")
 
+    # 设置仓库级 git 用户身份，确保 GitHub 将提交归因于 AI 账户而非本地用户
+    username = config.get("github_username", "")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", username)
+        cw.set_value("user", "email", f"{username}@users.noreply.github.com")
+
     issue_title = issue_data.get("title", f"Fix issue #{issue_number}")
     repo.index.commit(f"Auto-fix issue #{issue_number}: {issue_title[:60]}")
 
-    username = config.get("github_username", "")
     repo.git.push("origin", f"fix-issue-{issue_number}")
 
     pr_title = f"Fix #{issue_number}: {issue_title[:72]}"
