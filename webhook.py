@@ -114,7 +114,7 @@ async def _handle_issue_opened(
     """处理 Issue 打开事件：自动标签 → 智能回复 → 通知管理员。"""
     issue_data = body["issue"]
     repo_name = body["repository"]["full_name"]
-    admin_id = config.get("admin_user_id", "")
+    admin_id = _resolve_admin_id(adapter)
 
     labels: list[str] = []
 
@@ -185,7 +185,7 @@ async def _handle_pr_event(
             logger.error("PR #%d 审阅失败: %s", pr_number, result["error"])
             return
 
-        admin_id = config.get("admin_user_id", "")
+        admin_id = _resolve_admin_id(adapter)
         if admin_id:
             pr_url = pr_data["html_url"]
             verdict_emoji = {"approve": "OK", "comment": "COMMENT", "request_changes": "CHANGES"}
@@ -200,3 +200,13 @@ async def _handle_pr_event(
             )
     except Exception as exc:
         logger.error("PR #%d 审阅后台任务异常: %s", pr_number, exc, exc_info=True)
+
+
+def _resolve_admin_id(adapter: Any) -> str:
+    """从 adapter 读取 root 用户 ID。"""
+    if adapter is None:
+        return ""
+    plugin_config = getattr(adapter, "plugin_config", None)
+    if isinstance(plugin_config, dict):
+        return str(plugin_config.get("root", "")).strip()
+    return ""

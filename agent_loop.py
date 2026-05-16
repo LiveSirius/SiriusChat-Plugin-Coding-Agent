@@ -267,7 +267,6 @@ async def run_agent_loop(
     config: dict,
     engine_proxy: Any,
     adapter: Any | None = None,
-    admin_user_id: str = "",
 ) -> str:
     """完整的 agent 修复管线：工作区 → 代码分析 → 修改 → 测试 → PR。
 
@@ -363,7 +362,6 @@ async def run_agent_loop(
             engine_proxy=engine_proxy,
             issue_data=issue_data,
             adapter=adapter,
-            admin_user_id=admin_user_id,
         )
         stream.done(success=True, summary="PR 已创建", pr_url=pr_url)
         return "SUCCESS"
@@ -413,7 +411,6 @@ async def _finalize_and_create_pr(
     engine_proxy: Any,
     issue_data: dict,
     adapter: Any | None = None,
-    admin_user_id: str = "",
 ) -> str:
     """提交代码并创建 Pull Request。返回 PR URL。"""
     from git import Repo
@@ -442,11 +439,22 @@ async def _finalize_and_create_pr(
     )
     pr_url = pr_result.get("html_url", "") if pr_result else ""
 
-    if adapter and admin_user_id:
+    admin_id = _resolve_admin_id(adapter)
+    if adapter and admin_id:
         await adapter.send_private_message(
-            admin_user_id,
+            admin_id,
             f"修复完成，PR 已创建：{pr_url}",
         )
 
     shutil.rmtree(workspace_dir, ignore_errors=True)
     return pr_url
+
+
+def _resolve_admin_id(adapter: Any | None) -> str:
+    """从 adapter 读取 root 用户 ID。"""
+    if adapter is None:
+        return ""
+    plugin_config = getattr(adapter, "plugin_config", None)
+    if isinstance(plugin_config, dict):
+        return str(plugin_config.get("root", "")).strip()
+    return ""

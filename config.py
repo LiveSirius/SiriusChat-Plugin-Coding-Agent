@@ -13,9 +13,6 @@ class GithubAgentConfig:
     github_pat: str = ""
     github_username: str = ""
 
-    # 管理员
-    admin_user_id: str = ""
-
     # 绑定的仓库列表（支持多仓库绑定，每项格式 owner/repo）
     repos: list[str] = field(default_factory=list)
 
@@ -46,7 +43,6 @@ class GithubAgentConfig:
         return {
             "github_pat": _mask_secret(self.github_pat),
             "github_username": self.github_username,
-            "admin_user_id": self.admin_user_id,
             "repos": self.repos,
             "webhook_port": self.webhook_port,
             "webhook_secret": _mask_secret(self.webhook_secret),
@@ -71,7 +67,6 @@ class GithubAgentConfig:
         return cls(
             github_pat=data.get("github_pat", ""),
             github_username=data.get("github_username", ""),
-            admin_user_id=data.get("admin_user_id", ""),
             repos=list(repos),
             webhook_port=int(data.get("webhook_port", 0)),
             webhook_secret=data.get("webhook_secret", ""),

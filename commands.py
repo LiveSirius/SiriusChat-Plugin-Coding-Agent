@@ -27,7 +27,7 @@ async def handle_gh_command(
         /gh review <repo_index> <pr_number> [quick|deep] — 手动触发 PR 审阅（多仓库）
     """
     # 权限校验
-    admin_id = config.get("admin_user_id", "")
+    admin_id = _get_admin_id(ctx)
     if ctx.message.user_id != admin_id:
         return "权限不足"
 
@@ -75,7 +75,6 @@ async def _handle_auto_command(
             config=config,
             engine_proxy=engine_proxy,
             adapter=adapter,
-            admin_user_id=config.get("admin_user_id", ""),
         )
     )
     return f"任务已启动：Issue #{task_data.get('issue_number', '?')}"
@@ -180,7 +179,7 @@ async def _handle_review_command(
             if "error" in result:
                 logger.error("PR #%d 审阅失败: %s", pr_number, result["error"])
                 return
-            admin_id = config.get("admin_user_id", "")
+            admin_id = _get_admin_id(ctx)
             if admin_id and adapter:
                 pr_url = pr_data.get("html_url", "")
                 await adapter.send_private_message(
@@ -204,6 +203,17 @@ def _resolve_repo(repos: list[str], index: int | None) -> str:
         return repos[index]
     if len(repos) == 1:
         return repos[0]
+    return ""
+
+
+def _get_admin_id(ctx: Any) -> str:
+    """从 adapter 读取 root 用户 ID。"""
+    adapter = getattr(ctx, "adapter", None)
+    if adapter is None:
+        return ""
+    plugin_config = getattr(adapter, "plugin_config", None)
+    if isinstance(plugin_config, dict):
+        return str(plugin_config.get("root", "")).strip()
     return ""
 
 

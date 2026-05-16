@@ -28,7 +28,6 @@ class CodingAgentPlugin(PluginBase):
     _plugin_parameters = [
         {"name": "github_pat", "type": "string", "description": "GitHub Personal Access Token", "required": True},
         {"name": "github_username", "type": "string", "description": "GitHub 用户名", "required": True},
-        {"name": "admin_user_id", "type": "string", "description": "管理员 QQ 号", "required": True},
         {"name": "repos", "type": "list", "description": "绑定的仓库列表，每行一个，格式 owner/repo", "required": True},
         {"name": "webhook_port", "type": "int", "description": "Webhook 监听端口（0=自动分配）", "default": 0},
         {"name": "webhook_secret", "type": "string", "description": "Webhook HMAC 签名密钥（可选）"},
@@ -98,7 +97,7 @@ class CodingAgentPlugin(PluginBase):
         return {
             "github_pat": self._gh_config.github_pat,
             "github_username": self._gh_config.github_username,
-            "admin_user_id": self._gh_config.admin_user_id,
+            "admin_user_id": self._resolve_admin_id(),
             "repos": self._gh_config.repos,
             "model": self._gh_config.model,
             "webhook_secret": self._gh_config.webhook_secret,
@@ -111,6 +110,16 @@ class CodingAgentPlugin(PluginBase):
             "console_viewer_enabled": self._gh_config.console_viewer_enabled,
             "console_viewer_keep_open": self._gh_config.console_viewer_keep_open,
         }
+
+    def _resolve_admin_id(self) -> str:
+        """从 adapter 读取 root 用户 ID，不要求用户手动配置。"""
+        adapter = getattr(self.ctx, "adapter", None)
+        if adapter is None:
+            return ""
+        plugin_config = getattr(adapter, "plugin_config", None)
+        if isinstance(plugin_config, dict):
+            return str(plugin_config.get("root", "")).strip()
+        return ""
 
     @command(
         "py",
