@@ -406,6 +406,40 @@ async def close_pr(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 仓库上下文（README + 项目结构）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def get_readme(repo: str, config: dict[str, Any]) -> str:
+    """获取仓库 README 原始内容（最多 8KB）。"""
+    async with GitHubClient(_token_for_repo(config, repo)) as client:
+        resp = await client.get(
+            f"/repos/{repo}/readme",
+            headers={"Accept": "application/vnd.github.v3.raw"},
+        )
+        if resp.status_code == 200:
+            return resp.text[:8192]
+        logger.debug("获取 README 失败 %s: %d", repo, resp.status_code)
+        return ""
+
+
+async def get_repo_file_tree(repo: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """获取仓库顶层目录结构（最多 50 项）。
+    
+    排除 .git/ node_modules/ __pycache__ 等 noise 目录。
+    """
+    async with GitHubClient(_token_for_repo(config, repo)) as client:
+        resp = await client.get(f"/repos/{repo}/contents", params={"per_page": 50})
+        if resp.status_code == 200:
+            items = resp.json()
+            if isinstance(items, list):
+                noise = {".git", "node_modules", "__pycache__", ".venv", "venv", ".idea", ".vscode"}
+                return [it for it in items if it.get("name", "") not in noise]
+        logger.debug("获取仓库文件树失败 %s: %d", repo, resp.status_code)
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 列表轮询
 # ═══════════════════════════════════════════════════════════════════════
 

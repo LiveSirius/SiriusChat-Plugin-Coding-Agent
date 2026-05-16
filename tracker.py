@@ -24,7 +24,7 @@ class IssueState:
     __slots__ = (
         "issue_number", "repo", "title", "body", "labels",
         "status", "conversation", "gathered_summary", "last_comment_fetched_at",
-        "questions_asked", "last_activity", "task_id",
+        "questions_asked", "last_activity", "task_id", "repo_context",
     )
 
     def __init__(
@@ -41,6 +41,7 @@ class IssueState:
         questions_asked: int = 0,
         last_activity: float | None = None,
         task_id: str = "",
+        repo_context: str = "",
     ) -> None:
         self.issue_number = issue_number
         self.repo = repo
@@ -54,6 +55,7 @@ class IssueState:
         self.questions_asked = questions_asked
         self.last_activity = last_activity or time.time()
         self.task_id = task_id
+        self.repo_context = repo_context
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +71,7 @@ class IssueState:
             "questions_asked": self.questions_asked,
             "last_activity": self.last_activity,
             "task_id": self.task_id,
+            "repo_context": self.repo_context,
         }
 
     @classmethod
@@ -86,6 +89,7 @@ class IssueState:
             questions_asked=int(data.get("questions_asked", 0)),
             last_activity=float(data.get("last_activity", 0)) or time.time(),
             task_id=str(data.get("task_id", "")),
+            repo_context=str(data.get("repo_context", "")),
         )
 
     def add_conversation(self, role: str, content: str) -> None:
@@ -212,6 +216,10 @@ class IssueTracker:
         if state.status in ("CLOSED", "FIXING", "DONE", "ABORTED"):
             return
 
+        # 首次处理时拉取仓库上下文（README + 顶层目录结构）
+        if not state.repo_context:
+            await self._load_repo_context(state)
+
         # 1. 拉取新评论
         await self._fetch_new_comments(state)
 
@@ -228,6 +236,35 @@ class IssueTracker:
             else:
                 logger.debug("Tracker: Issue #%d 等待回复中 (%.0fs/120s)",
                              state.issue_number, since_last)
+
+    async def _load_repo_context(self, state: IssueState) -> None:
+        """拉取仓库 README 和顶层目录结构，注入到 state.repo_context。"""
+        logger.info("Tracker: Issue #%d 首次拉取仓库 %s 上下文", state.issue_number, state.repo)
+        try:
+            readme_text = ""
+            tree_items: list[dict[str, Any]] = []
+            from .api import get_readme, get_repo_file_tree
+            readme_text, tree_items = await asyncio.gather(
+                get_readme(state.repo, self._config),
+                get_repo_file_tree(state.repo, self._config),
+            )
+            lines: list[str] = []
+            if readme_text:
+                lines.append(f"README 摘要（前2000字）:\n{readme_text[:2000]}")
+            if tree_items:
+                file_list = []
+                for it in tree_items:
+                    itype = "dir/" if it.get("type") == "dir" else ""
+                    file_list.append(f"  {itype}{it.get('name', '?')}")
+                lines.append(f"顶层目录结构:\n" + "\n".join(file_list[:40]))
+            state.repo_context = "\n\n".join(lines)
+            self._save(state)
+            logger.info("Tracker: Issue #%d 仓库上下文已加载 (%d 字符)",
+                         state.issue_number, len(state.repo_context))
+        except Exception:
+            state.repo_context = "（仓库上下文加载失败）"
+            self._save(state)
+            logger.exception("Tracker: Issue #%d 加载仓库上下文失败", state.issue_number)
 
     async def _fetch_new_comments(self, state: IssueState) -> None:
         import datetime

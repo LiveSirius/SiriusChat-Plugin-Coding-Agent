@@ -77,6 +77,10 @@ def _build_gather_prompt(state: Any, code_context: dict[str, str] | None = None)
             code_parts.append(f"```\n# {path}\n{content[:3000]}\n```")
         code_section = "\n\n已查看的代码文件:\n" + "\n\n".join(code_parts)
 
+    repo_section = ""
+    if state.repo_context:
+        repo_section = f"\n\n仓库背景信息:\n{state.repo_context}"
+
     return f"""你正在管理一个 GitHub Issue。请判断下一步应该做什么。
 
 Issue #{state.issue_number}: {state.title}
@@ -84,8 +88,7 @@ Issue #{state.issue_number}: {state.title}
 对话历史（最近 10 条）:
 {conv_text}
 
-已追问次数: {state.questions_asked}
-{code_section}
+已追问次数: {state.questions_asked}{repo_section}{code_section}
 
 请选择以下 action 之一：
 - "ask": 信息不足，需要追问用户
