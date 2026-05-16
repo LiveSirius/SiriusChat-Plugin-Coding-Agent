@@ -118,23 +118,22 @@ async def _handle_issue_opened(
 
     labels: list[str] = []
 
-    # 1. 自动标签
+    # 1. 自动标签（带重试，失败时记录错误日志）
     if config.get("auto_label", True):
         try:
             labels = await auto_label_issue(issue_data, repo_name, config, engine_proxy)
             await apply_labels_to_issue(repo_name, issue_data["number"], labels, config)
             logger.info("Issue #%d 自动标签: %s", issue_data["number"], labels)
         except Exception as exc:
-            logger.warning("自动标签失败（不阻塞主流程）: %s", exc)
+            logger.error("Issue #%d 自动标签失败: %s", issue_data["number"], exc, exc_info=True)
 
-    # 2. 智能回复
+    # 2. 智能回复（带重试，失败时记录错误日志）
     if config.get("auto_comment", True):
         try:
             comment = await generate_issue_comment(issue_data, labels, repo_name, engine_proxy, config)
             await post_comment(repo_name, issue_data["number"], comment, config)
-            logger.info("Issue #%d 智能回复已发表", issue_data["number"])
         except Exception as exc:
-            logger.warning("智能回复失败（不阻塞主流程）: %s", exc)
+            logger.error("Issue #%d 智能回复失败: %s", issue_data["number"], exc, exc_info=True)
 
     # 3. 生成 TaskID → 持久化 → 通知管理员
     task_id = uuid.uuid4().hex[:12]
@@ -200,4 +199,4 @@ async def _handle_pr_event(
                 f"链接: {pr_url}",
             )
     except Exception as exc:
-        logger.error("PR 审阅后台任务异常: %s", exc)
+        logger.error("PR #%d 审阅后台任务异常: %s", pr_number, exc, exc_info=True)

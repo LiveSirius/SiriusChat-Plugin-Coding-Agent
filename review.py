@@ -11,6 +11,7 @@ from .api import _headers
 logger = logging.getLogger(__name__)
 
 _BASE = "https://api.github.com"
+_REVIEW_RETRIES = 3
 
 
 async def auto_review_pr(
@@ -98,17 +99,39 @@ DIFF:
     ]
 }}"""
 
-    result_text = await engine_proxy.generate_raw(system_prompt, inject_persona=True)
+    last_error = None
+    review_result = None
+    for attempt in range(1, _REVIEW_RETRIES + 1):
+        try:
+            result_text = await engine_proxy.generate_raw(system_prompt, inject_persona=True)
+            stripped = result_text.strip()
+            # 尝试提取 JSON（容错 Markdown 代码块包裹）
+            for candidate in _extract_json_candidates(stripped):
+                try:
+                    review_result = json.loads(candidate)
+                    break
+                except json.JSONDecodeError:
+                    continue
+            if review_result is not None:
+                break
+            raise ValueError(f"无法从 LLM 输出中解析审阅 JSON: {stripped[:200]}")
+        except Exception as exc:
+            last_error = exc
+            if attempt < _REVIEW_RETRIES:
+                logger.info(
+                    "PR #%d 审阅 JSON 解析第 %d/%d 次失败，重试中: %s",
+                    pr_number, attempt, _REVIEW_RETRIES, exc,
+                )
+            else:
+                logger.error(
+                    "PR #%d 审阅 JSON 解析 %d 次重试全部失败: %s",
+                    pr_number, _REVIEW_RETRIES, exc,
+                )
 
-    try:
-        review_result = json.loads(result_text.strip())
-    except json.JSONDecodeError:
-        logger.warning("PR 审阅 JSON 解析失败，降级为纯文本评论")
-        review_result = {
-            "verdict": "comment",
-            "summary": "（自动审阅生成，原始输出非 JSON 格式）",
-            "issues": [],
-        }
+    if review_result is None:
+        raise RuntimeError(
+            f"PR #{pr_number} 审阅 JSON 解析失败（{_REVIEW_RETRIES}次重试）"
+        ) from last_error
 
     async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
         body_lines = [f"**自动代码审阅**\n\n{review_result.get('summary', '')}\n"]
@@ -192,6 +215,22 @@ async def post_inline_review_comments(
             except Exception as exc:
                 logger.warning("发布行内评论失败: %s", exc)
     return posted
+
+
+def _extract_json_candidates(text: str) -> list[str]:
+    """从 LLM 输出中提取可能的 JSON 段落。"""
+    candidates = [text]
+    if "```json" in text:
+        start = text.index("```json") + 7
+        end = text.find("```", start)
+        if end > start:
+            candidates.insert(0, text[start:end].strip())
+    elif "```" in text:
+        start = text.index("```") + 3
+        end = text.find("```", start)
+        if end > start:
+            candidates.insert(0, text[start:end].strip())
+    return candidates
 
 
 async def has_existing_review(

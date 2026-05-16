@@ -20,6 +20,7 @@ from .stream_writer import StreamWriter
 logger = logging.getLogger(__name__)
 
 _VIEWER_SCRIPT = "console_viewer.py"
+_CHANGELOG_RETRIES = 3
 
 
 def _launch_console_viewer(stream_file: Path, keep_open: bool = False) -> subprocess.Popen | None:
@@ -78,6 +79,7 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     try:
         repo.git.checkout("-b", fix_branch)
     except Exception:
+        logger.info("分支 %s 已存在，切换到该分支", fix_branch)
         repo.git.checkout(fix_branch)
 
     return task_dir
@@ -237,11 +239,27 @@ async def generate_changelog(diff: str, issue_data: dict, engine_proxy: Any) -> 
         f"5. 禁止输出 JSON，直接输出 Markdown 要点\n\n"
         f"Git Diff:\n{diff[:6000]}"
     )
-    try:
-        result = await engine_proxy.generate_raw(prompt, inject_persona=True)
-        return result.strip()
-    except Exception:
-        return "（自动 Changelog 生成失败）"
+    last_error = None
+    for attempt in range(1, _CHANGELOG_RETRIES + 1):
+        try:
+            result = await engine_proxy.generate_raw(prompt, inject_persona=True)
+            return result.strip()
+        except Exception as exc:
+            last_error = exc
+            if attempt < _CHANGELOG_RETRIES:
+                logger.info(
+                    "Changelog 生成第 %d/%d 次失败，重试中: %s",
+                    attempt, _CHANGELOG_RETRIES, exc,
+                )
+            else:
+                logger.error(
+                    "Changelog 生成 %d 次重试全部失败: %s",
+                    _CHANGELOG_RETRIES, exc,
+                )
+
+    raise RuntimeError(
+        f"Issue #{issue_data.get('number', '?')} Changelog 生成失败（{_CHANGELOG_RETRIES}次重试）"
+    ) from last_error
 
 
 async def run_agent_loop(

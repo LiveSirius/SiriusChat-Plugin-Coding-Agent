@@ -8,6 +8,8 @@ from .api import add_labels_to_issue, create_label, get_labels
 
 logger = logging.getLogger(__name__)
 
+_MAX_RETRIES = 3
+
 # 标签元数据：颜色和描述
 _LABEL_META: dict[str, tuple[str, str]] = {
     "type:bug":              ("d73a4a", "Something isn't working"),
@@ -38,6 +40,34 @@ def _label_metadata(label_name: str) -> tuple[str, str]:
     return _LABEL_META.get(label_name, ("cccccc", ""))
 
 
+async def _parse_label_data(result: str) -> dict:
+    """解析 LLM 输出的标签 JSON。带重试提示的重试由调用方控制。"""
+    stripped = result.strip()
+    # 尝试提取 JSON（有些模型会在 JSON 外包 Markdown 代码块）
+    for candidate in _extract_json_candidates(stripped):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    raise ValueError(f"无法从 LLM 输出中解析标签 JSON: {stripped[:200]}")
+
+
+def _extract_json_candidates(text: str) -> list[str]:
+    """从 LLM 输出中提取可能的 JSON 段落。"""
+    candidates = [text]
+    if "```json" in text:
+        start = text.index("```json") + 7
+        end = text.find("```", start)
+        if end > start:
+            candidates.insert(0, text[start:end].strip())
+    elif "```" in text:
+        start = text.index("```") + 3
+        end = text.find("```", start)
+        if end > start:
+            candidates.insert(0, text[start:end].strip())
+    return candidates
+
+
 async def auto_label_issue(
     issue_data: dict,
     repo_name: str,
@@ -48,6 +78,7 @@ async def auto_label_issue(
 
     通过 EngineProxy.generate_raw(inject_persona=True) 调用，
     输出结构化 JSON 供程序解析和应用。
+    失败时自动重试，不降级到关键词匹配。
     """
     prompt = f"""分析以下 GitHub Issue，输出 JSON 格式的标签建议。以你的角色身份进行分析，分析结果应符合该角色的认知视角。
 
@@ -70,12 +101,33 @@ Issue 内容:
     "auto_apply": true,
     "reason_brief": "一句话理由"
 }}"""
-    try:
-        result = await engine_proxy.generate_raw(prompt, inject_persona=True)
-        label_data = json.loads(result.strip())
-    except (json.JSONDecodeError, Exception):
-        return _fallback_label_by_keywords(issue_data)
 
+    last_error = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            result = await engine_proxy.generate_raw(prompt, inject_persona=True)
+            label_data = await _parse_label_data(result)
+            return _build_label_list(label_data)
+        except Exception as exc:
+            last_error = exc
+            if attempt < _MAX_RETRIES:
+                logger.info(
+                    "Issue #%d 标签分类第 %d/%d 次失败，重试中: %s",
+                    issue_data.get("number", "?"), attempt, _MAX_RETRIES, exc,
+                )
+            else:
+                logger.error(
+                    "Issue #%d 标签分类 %d 次重试全部失败: %s",
+                    issue_data.get("number", "?"), _MAX_RETRIES, exc,
+                )
+
+    raise RuntimeError(
+        f"Issue #{issue_data.get('number', '?')} 标签分类失败（{_MAX_RETRIES}次重试）"
+    ) from last_error
+
+
+def _build_label_list(label_data: dict) -> list[str]:
+    """从解析后的标签数据构建标签名列表。"""
     labels: list[str] = []
 
     type_map = {
@@ -110,28 +162,6 @@ Issue 内容:
     if (label_data.get("difficulty") == "easy" and
             label_data.get("type") in ("bug", "feature")):
         labels.append("status:good-first-issue")
-
-    return labels
-
-
-def _fallback_label_by_keywords(issue_data: dict) -> list[str]:
-    """LLM 分类失败时的关键词降级方案。"""
-    text = f"{issue_data.get('title', '')} {issue_data.get('body', '')}".lower()
-    labels = ["status:needs-triage"]
-
-    if any(kw in text for kw in ["bug", "报错", "错误", "crash", "崩溃", "异常"]):
-        labels.append("type:bug")
-    elif any(kw in text for kw in ["feature", "功能", "建议", "希望", "新增"]):
-        labels.append("type:feature")
-    elif any(kw in text for kw in ["doc", "文档", "说明", "readme"]):
-        labels.append("type:docs")
-    else:
-        labels.append("type:question")
-
-    if any(kw in text for kw in ["紧急", "urgent", "critical", "严重", "线上"]):
-        labels.append("priority:critical")
-    elif any(kw in text for kw in ["重要", "high", "核心"]):
-        labels.append("priority:high")
 
     return labels
 

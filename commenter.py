@@ -7,6 +7,8 @@ from .api import post_issue_comment
 
 logger = logging.getLogger(__name__)
 
+_MAX_RETRIES = 3
+
 
 async def generate_issue_comment(
     issue_data: dict,
@@ -15,7 +17,11 @@ async def generate_issue_comment(
     engine_proxy: Any,
     config: dict | None = None,
 ) -> str:
-    """使用 LLM 生成 Issue 智能回复评论。人格属性由 generate_raw(inject_persona=True) 自动注入。"""
+    """使用 LLM 生成 Issue 智能回复评论。
+
+    失败时自动重试（最多 3 次），不降级到模板回复。
+    人格属性由 generate_raw(inject_persona=True) 自动注入。
+    """
     label_display = " ".join(f"`{l}`" for l in labels) if labels else "（待人工分类）"
 
     prompt = f"""你正在回复一个 GitHub Issue。回复内容将在 Issue 下公开发表，面向 Issue 提交者。请以你的角色身份和沟通风格撰写回复。
@@ -38,17 +44,28 @@ Issue 内容:
 8. 输出纯文本（Markdown 格式，但不要代码块包裹）
 
 请直接输出评论正文，不要包含任何前缀说明。"""
-    try:
-        result = await engine_proxy.generate_raw(prompt, inject_persona=True)
-        return result.strip()
-    except Exception:
-        issue_title = issue_data.get("title", "未知")
-        issue_number = issue_data.get("number", "?")
-        return (
-            f"感谢提交 Issue #{issue_number}：{issue_title}！\n\n"
-            f"已自动分析并应用标签：{label_display}\n\n"
-            f"管理员将尽快评估此 Issue，届时可能启动自动修复流程。感谢你的反馈！"
-        )
+
+    last_error = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            result = await engine_proxy.generate_raw(prompt, inject_persona=True)
+            return result.strip()
+        except Exception as exc:
+            last_error = exc
+            if attempt < _MAX_RETRIES:
+                logger.info(
+                    "Issue #%d 智能回复第 %d/%d 次失败，重试中: %s",
+                    issue_data.get("number", "?"), attempt, _MAX_RETRIES, exc,
+                )
+            else:
+                logger.error(
+                    "Issue #%d 智能回复 %d 次重试全部失败: %s",
+                    issue_data.get("number", "?"), _MAX_RETRIES, exc,
+                )
+
+    raise RuntimeError(
+        f"Issue #{issue_data.get('number', '?')} 智能回复生成失败（{_MAX_RETRIES}次重试）"
+    ) from last_error
 
 
 async def post_comment(
@@ -58,4 +75,9 @@ async def post_comment(
     config: dict,
 ) -> bool:
     """在 Issue 下发表评论。"""
-    return await post_issue_comment(repo_full_name, issue_number, comment_body, config)
+    result = await post_issue_comment(repo_full_name, issue_number, comment_body, config)
+    if result:
+        logger.info("Issue #%d 智能回复已发表", issue_number)
+    else:
+        logger.error("Issue #%d 智能回复发表失败", issue_number)
+    return result
