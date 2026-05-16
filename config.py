@@ -39,6 +39,9 @@ class GithubAgentConfig:
     console_viewer_enabled: bool = True
     console_viewer_keep_open: bool = False
 
+    # 轮询（不需要 Webhook 时的替代方案）
+    poll_interval_seconds: int = 60  # 0 = 禁用轮询
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "github_pat": _mask_secret(self.github_pat),
@@ -57,6 +60,7 @@ class GithubAgentConfig:
             "review_mode": self.review_mode,
             "console_viewer_enabled": self.console_viewer_enabled,
             "console_viewer_keep_open": self.console_viewer_keep_open,
+            "poll_interval_seconds": self.poll_interval_seconds,
         }
 
     @classmethod
@@ -81,6 +85,7 @@ class GithubAgentConfig:
             review_mode=data.get("review_mode", "quick"),
             console_viewer_enabled=_parse_bool(data.get("console_viewer_enabled", True)),
             console_viewer_keep_open=_parse_bool(data.get("console_viewer_keep_open", False)),
+            poll_interval_seconds=int(data.get("poll_interval_seconds", 60)),
         )
 
 

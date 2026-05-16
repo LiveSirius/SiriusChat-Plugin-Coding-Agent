@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import sys
 import traceback
 from typing import Any
 
+from sirius_chat.github_webhook import GitHubWebhookServer
 from sirius_chat.plugins import PluginBase, PluginResponse
 from sirius_chat.plugins.decorators import command
 
 from .commands import handle_gh_command
 from .config import GithubAgentConfig
-from .webhook import start_webhook_server
+from .webhook import handle_issue_opened, handle_pr_event
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +43,17 @@ class CodingAgentPlugin(PluginBase):
         {"name": "review_mode", "type": "string", "description": "PR 审阅深度: quick|deep", "default": "quick"},
         {"name": "console_viewer_enabled", "type": "boolean", "description": "弹出实时控制台窗口", "default": True},
         {"name": "console_viewer_keep_open", "type": "boolean", "description": "修复完成后保持窗口打开", "default": False},
+        {"name": "poll_interval_seconds", "type": "int", "description": "API 轮询间隔（秒，0=仅用Webhook，默认60）", "default": 60},
     ]
 
     def __init__(self) -> None:
         self._gh_config: GithubAgentConfig | None = None
-        self._webhook_runner: Any = None
+        self._webhook_server: GitHubWebhookServer | None = None
         self._webhook_port: int = 0
+        self._poll_task: asyncio.Task | None = None
 
     async def on_load(self) -> None:
-        """加载配置并启动 Webhook 服务。
+        """加载配置并启动 Webhook 服务（复用框架 GitHubWebhookServer）。
 
         配置优先级：ctx.config（WebUI 设置） > data_store（旧兼容）
         """
@@ -67,25 +71,68 @@ class CodingAgentPlugin(PluginBase):
         if self._gh_config.github_pat and self._gh_config.repos:
             config_dict = self._build_config_dict()
             try:
-                runner, port = await start_webhook_server(
+                # 使用框架级 GitHubWebhookServer
+                self._webhook_server = GitHubWebhookServer(
+                    secret=self._gh_config.webhook_secret,
                     host="127.0.0.1",
                     port=self._gh_config.webhook_port,
-                    config=config_dict,
-                    adapter=self.ctx.adapter,
-                    engine_proxy=self.ctx.engine_proxy,
-                    data_store=self.ctx.data_store,
                 )
-                self._webhook_runner = runner
-                self._webhook_port = port
-                logger.info("GitHub Webhook 服务已启动: 127.0.0.1:%s", port)
+                self._webhook_server.set_repo_filter(
+                    lambda r: r in self._gh_config.repos
+                )
+
+                # 注册 Issue 处理器（仅 opened 动作）
+                adapter = self.ctx.adapter
+                engine_proxy = self.ctx.engine_proxy
+                data_store = self.ctx.data_store
+
+                async def _on_issue(event_type: str, body: dict[str, Any]) -> None:
+                    if body.get("action") == "opened":
+                        await handle_issue_opened(body, config_dict, adapter, engine_proxy, data_store)
+
+                self._webhook_server.add_handler("issues", _on_issue)
+
+                # 注册 PR 处理器（仅 opened / synchronize 动作）
+                async def _on_pr(event_type: str, body: dict[str, Any]) -> None:
+                    action = body.get("action", "")
+                    if action in ("opened", "synchronize"):
+                        asyncio.create_task(
+                            handle_pr_event(body, config_dict, adapter, engine_proxy)
+                        )
+
+                self._webhook_server.add_handler("pull_request", _on_pr)
+
+                self._webhook_port = await self._webhook_server.start()
+                logger.info("GitHub Webhook 服务已启动: 127.0.0.1:%s", self._webhook_port)
             except Exception as exc:
                 logger.warning("Webhook 服务启动失败（不影响插件运行）: %s", exc)
 
+        # 启动 API 轮询（>0 时启用，即使 Webhook 可用也作为兜底）
+        poll_interval = self._gh_config.poll_interval_seconds
+        if self._gh_config.github_pat and self._gh_config.repos and poll_interval > 0:
+            from .poller import start_polling_loop
+
+            config_dict = self._build_config_dict()
+            self._poll_task = await start_polling_loop(
+                config=config_dict,
+                adapter=self.ctx.adapter,
+                engine_proxy=self.ctx.engine_proxy,
+                data_store=self.ctx.data_store,
+            )
+            logger.info("API 轮询已启动（间隔 %d 秒）", poll_interval)
+
     async def on_unload(self) -> None:
-        """停止 Webhook 服务，释放资源。"""
-        if self._webhook_runner:
+        """停止 Webhook 服务和轮询任务，释放资源。"""
+        if self._poll_task:
+            self._poll_task.cancel()
             try:
-                await self._webhook_runner.cleanup()
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("API 轮询已停止")
+        if self._webhook_server:
+            try:
+                await self._webhook_server.stop()
                 logger.info("Webhook 服务已停止")
             except Exception as exc:
                 logger.warning("停止 Webhook 服务时出错: %s", exc)
@@ -109,6 +156,7 @@ class CodingAgentPlugin(PluginBase):
             "webhook_public_url": self._gh_config.webhook_public_url,
             "console_viewer_enabled": self._gh_config.console_viewer_enabled,
             "console_viewer_keep_open": self._gh_config.console_viewer_keep_open,
+            "poll_interval_seconds": self._gh_config.poll_interval_seconds,
         }
 
     def _resolve_admin_id(self) -> str:

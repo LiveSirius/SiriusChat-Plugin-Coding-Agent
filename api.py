@@ -216,3 +216,48 @@ async def post_issue_comment(
             return True
         logger.error("发表 Issue 评论失败: %d %s", resp.status_code, resp.text[:200])
         return False
+
+
+async def list_repo_issues(
+    repo: str,
+    config: dict[str, Any],
+    *,
+    since: str | None = None,
+    state: str = "open",
+    per_page: int = 30,
+) -> list[dict[str, Any]]:
+    """获取仓库的 Issue 列表（不含 PR）。
+
+    按创建时间倒序，用于轮询检测新 Issue。
+    """
+    params: dict[str, Any] = {"state": state, "sort": "created", "direction": "desc", "per_page": per_page}
+    if since:
+        params["since"] = since
+    async with _client(config) as cli:
+        resp = await cli.get(f"{_BASE}/repos/{repo}/issues", params=params)
+        if resp.status_code == 200:
+            return [item for item in resp.json() if "pull_request" not in item]
+        logger.error("获取 Issue 列表失败 %s: %d %s", repo, resp.status_code, resp.text[:200])
+        return []
+
+
+async def list_repo_pulls(
+    repo: str,
+    config: dict[str, Any],
+    *,
+    state: str = "open",
+    per_page: int = 30,
+) -> list[dict[str, Any]]:
+    """获取仓库的 PR 列表。
+
+    按更新时间倒序，用于轮询检测新 PR 或需要审阅的 PR。
+    """
+    async with _client(config) as cli:
+        resp = await cli.get(
+            f"{_BASE}/repos/{repo}/pulls",
+            params={"state": state, "sort": "updated", "direction": "desc", "per_page": per_page},
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        logger.error("获取 PR 列表失败 %s: %d %s", repo, resp.status_code, resp.text[:200])
+        return []

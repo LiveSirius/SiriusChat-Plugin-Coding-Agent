@@ -1,14 +1,16 @@
+"""Plugin webhook 事件处理器（业务逻辑层）。
+
+复用框架 sirius_chat.github_webhook.GitHubWebhookServer 作为 HTTP 服务器基础设施，
+本模块仅包含 Issue/PR 的具体处理逻辑。
+"""
+
 from __future__ import annotations
 
 import asyncio
-import hmac
-import json
 import logging
 import time
 import uuid
 from typing import Any
-
-from aiohttp import web
 
 from .commenter import generate_issue_comment, post_comment
 from .labeler import apply_labels_to_issue, auto_label_issue
@@ -17,96 +19,9 @@ from .review import auto_review_pr, has_existing_review
 logger = logging.getLogger(__name__)
 
 
-def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
-    """验证 GitHub Webhook HMAC-SHA256 签名。"""
-    if not secret:
-        return True
-    expected = "sha256=" + hmac.new(secret.encode(), payload, "sha256").hexdigest()
-    return hmac.compare_digest(expected, signature)
-
-
-async def start_webhook_server(
-    host: str,
-    port: int,
+async def handle_issue_opened(
+    body: dict[str, Any],
     config: dict[str, Any],
-    adapter: Any,
-    engine_proxy: Any,
-    data_store: Any,
-) -> tuple[web.AppRunner, int]:
-    """启动 Webhook HTTP 服务。
-
-    返回 (runner, actual_port)，port=0 时自动分配空闲端口。
-    """
-    app = web.Application()
-
-    async def handler(request: web.Request) -> web.Response:
-        return await webhook_handler(request, config, adapter, engine_proxy, data_store)
-
-    app.router.add_post("/webhook/github", handler)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host, port)
-    await site.start()
-
-    # 获取实际端口（port=0 自动分配时）
-    actual_port = site._server.sockets[0].getsockname()[1] if port == 0 else port
-    logger.info("Webhook HTTP 服务已启动: http://%s:%s/webhook/github", host, actual_port)
-    return runner, actual_port
-
-
-async def webhook_handler(
-    request: web.Request,
-    config: dict[str, Any],
-    adapter: Any,
-    engine_proxy: Any,
-    data_store: Any,
-) -> web.Response:
-    """GitHub Webhook 统一入口。
-
-    按 X-GitHub-Event 头分发到不同流程：
-    - issues → Issue 自动修复流（标签 + 回复 + 通知）
-    - pull_request → PR 自动审阅流
-    """
-    # 签名验证
-    body_bytes = await request.read()
-    sig = request.headers.get("X-Hub-Signature-256", "")
-    secret = config.get("webhook_secret", "")
-    if not verify_signature(body_bytes, sig, secret):
-        logger.warning("Webhook 签名验证失败")
-        return web.json_response({"error": "signature mismatch"}, status=401)
-
-    event_type = request.headers.get("X-GitHub-Event", "")
-    body = await request.json()
-
-    repo_name = body.get("repository", {}).get("full_name", "")
-    repos = config.get("repos", [])
-
-    # 校验仓库是否在绑定列表中
-    if repos and repo_name not in repos:
-        logger.debug("Webhook 仓库 %s 不在绑定列表中，忽略", repo_name)
-        return web.json_response({"status": "ignored", "reason": "repo not in bindings"})
-
-    # ── Issue 事件 ──
-    if event_type == "issues" and body.get("action") == "opened":
-        await _handle_issue_opened(body, config, adapter, engine_proxy, data_store)
-        return web.json_response({"status": "ok", "event": "issue_opened"})
-
-    # ── PR 事件（审阅流） ──
-    if event_type == "pull_request":
-        action = body.get("action", "")
-        if action in ("opened", "synchronize"):
-            asyncio.create_task(
-                _handle_pr_event(body, config, adapter, engine_proxy)
-            )
-            return web.json_response({"status": "ok", "event": "pr_review_triggered"})
-
-    return web.json_response({"status": "ignored"})
-
-
-async def _handle_issue_opened(
-    body: dict,
-    config: dict,
     adapter: Any,
     engine_proxy: Any,
     data_store: Any,
@@ -160,9 +75,9 @@ async def _handle_issue_opened(
         )
 
 
-async def _handle_pr_event(
-    body: dict,
-    config: dict,
+async def handle_pr_event(
+    body: dict[str, Any],
+    config: dict[str, Any],
     adapter: Any,
     engine_proxy: Any,
 ) -> None:
