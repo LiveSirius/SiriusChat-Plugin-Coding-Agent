@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,9 @@ class GithubAgentConfig:
     webhook_port: int = 0
     webhook_public_url: str = ""
     workspace_dir: Path = Path("data/github_workspace")
+
+    # ── 生效仓库过滤（空=全部）──
+    active_repos: list[str] = field(default_factory=list)
 
     # ── 写操作 Token（与 github_monitor 的读 token 分离）──
     github_write_token: str = ""
@@ -43,6 +46,7 @@ class GithubAgentConfig:
         return {
             "webhook_port": self.webhook_port,
             "webhook_public_url": self.webhook_public_url,
+            "active_repos": self.active_repos,
             "github_write_token": _mask_secret(self.github_write_token),
             "workspace_dir": str(self.workspace_dir),
             "max_retries": self.max_retries,
@@ -62,6 +66,7 @@ class GithubAgentConfig:
         return cls(
             webhook_port=int(data.get("webhook_port", 0)),
             webhook_public_url=data.get("webhook_public_url", ""),
+            active_repos=_parse_list(data.get("active_repos", [])),
             github_write_token=data.get("github_write_token", ""),
             workspace_dir=Path(data.get("workspace_dir", "data/github_workspace")),
             max_retries=int(data.get("max_retries", 3)),
@@ -91,3 +96,11 @@ def _mask_secret(value: str) -> str:
     if not value or len(value) < 8:
         return value or ""
     return value[:4] + "****"
+
+
+def _parse_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return []

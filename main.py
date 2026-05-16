@@ -42,11 +42,13 @@ class CodingAgentPlugin(PluginBase):
         {"name": "console_viewer_enabled", "type": "boolean", "description": "弹出实时控制台窗口", "default": True},
         {"name": "console_viewer_keep_open", "type": "boolean", "description": "修复完成后保持窗口打开", "default": False},
         {"name": "poll_interval_seconds", "type": "int", "description": "API 轮询间隔（秒，0=仅用Webhook，默认60）", "default": 60},
+        {"name": "active_repos", "type": "list", "description": "生效仓库（owner/repo，每行一个，留空=monitor中全部仓库生效）"},
     ]
 
     def __init__(self) -> None:
         self._gh_config: GithubAgentConfig | None = None
         self._monitor: MonitorConfig = MonitorConfig()
+        self._effective_repos: list[str] = []
         self._webhook_server: GitHubWebhookServer | None = None
         self._webhook_port: int = 0
         self._poll_task: asyncio.Task | None = None
@@ -67,6 +69,20 @@ class CodingAgentPlugin(PluginBase):
             logger.info("github_monitor 中未配置任何仓库，等待配置后重新加载")
             return
 
+        # 过滤生效仓库：active_repos 非空时只处理选中的仓库
+        active = self._gh_config.active_repos
+        if active:
+            active_set = set(active)
+            self._effective_repos = [r for r in self._monitor.repo_names if r in active_set]
+            logger.info("生效仓库过滤: %d/%d (%s)", len(self._effective_repos), len(self._monitor.repo_names),
+                        ", ".join(self._effective_repos) if self._effective_repos else "无")
+        else:
+            self._effective_repos = list(self._monitor.repo_names)
+
+        if not self._effective_repos:
+            logger.info("active_repos 过滤后无生效仓库，跳过插件启动")
+            return
+
         config_dict = self._build_config_dict()
 
         # ── Webhook 模式（收到 GitHub push 时实时触发）──
@@ -77,7 +93,7 @@ class CodingAgentPlugin(PluginBase):
                 port=self._gh_config.webhook_port,
             )
             self._webhook_server.set_repo_filter(
-                lambda r: r in self._monitor.repo_names
+                lambda r: r in self._effective_repos
             )
 
             adapter = self.ctx.adapter
@@ -142,8 +158,9 @@ class CodingAgentPlugin(PluginBase):
         if self._gh_config is None:
             return {}
         return {
-            "repos": self._monitor.repo_names,
+            "repos": self._effective_repos,
             "_monitor": self._monitor,
+            "active_repos": self._effective_repos,
             "github_write_token": self._gh_config.github_write_token,
             "admin_user_id": self._resolve_admin_id(),
             "model": self._gh_config.model,
@@ -193,7 +210,7 @@ class CodingAgentPlugin(PluginBase):
     @command(
         "gh",
         prefix="/",
-        patterns=["/gh"],
+        patterns=["gh"],
         render_mode="direct",
         description="GitHub Agent 指令：管理 Issue 修复、PR 审阅",
         examples=["/gh <task_id> auto", "/gh review <repo_index> <pr_number> [quick|deep]"],
