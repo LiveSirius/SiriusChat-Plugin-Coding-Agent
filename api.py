@@ -243,6 +243,66 @@ async def post_issue_comment(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Issue / PR 状态操作
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def close_issue(
+    repo: str,
+    issue_number: int,
+    comment_body: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """关闭 Issue，可选附带一条关闭说明评论。
+
+    先发表评论（若提供），再 PATCH state=closed。
+    """
+    if config is None:
+        config = {}
+    async with GitHubClient(_write_token_for_repo(config)) as client:
+        if comment_body:
+            await client.post(
+                f"/repos/{repo}/issues/{issue_number}/comments",
+                json={"body": comment_body},
+            )
+        resp = await client.patch(
+            f"/repos/{repo}/issues/{issue_number}",
+            json={"state": "closed"},
+        )
+        if resp.status_code == 200:
+            logger.info("已关闭 Issue %s #%d", repo, issue_number)
+            return True
+        logger.error("关闭 Issue %s #%d 失败: %d %s", repo, issue_number, resp.status_code, resp.text[:200])
+        return False
+
+
+async def close_pr(
+    repo: str,
+    pr_number: int,
+    comment_body: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """关闭 PR，可选附带一条关闭说明评论。"""
+    if config is None:
+        config = {}
+    async with GitHubClient(_write_token_for_repo(config)) as client:
+        if comment_body:
+            await client.post(
+                f"/repos/{repo}/issues/{pr_number}/comments",
+                json={"body": comment_body},
+            )
+        resp = await client.patch(
+            f"/repos/{repo}/pulls/{pr_number}",
+            json={"state": "closed"},
+        )
+        if resp.status_code == 200:
+            logger.info("已关闭 PR %s #%d", repo, pr_number)
+            return True
+        logger.error("关闭 PR %s #%d 失败: %d %s", repo, pr_number, resp.status_code, resp.text[:200])
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 列表轮询
 # ═══════════════════════════════════════════════════════════════════════
 

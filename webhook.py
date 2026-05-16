@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 from .commenter import generate_issue_comment, post_comment
+from .closer import try_close_garbage_issue, try_close_garbage_pr
 from .labeler import apply_labels_to_issue, auto_label_issue
 from .review import auto_review_pr, has_existing_review
 
@@ -26,10 +27,25 @@ async def handle_issue_opened(
     engine_proxy: Any,
     data_store: Any,
 ) -> None:
-    """处理 Issue 打开事件：自动标签 → 智能回复 → 通知管理员。"""
+    """处理 Issue 打开事件：垃圾检测 → 自动标签 → 智能回复 → 通知管理员。"""
     issue_data = body["issue"]
     repo_name = body["repository"]["full_name"]
     admin_id = _resolve_admin_id(adapter)
+
+    # 0. 垃圾检测（优先执行，判定为垃圾则跳过后续流程）
+    if config.get("auto_close_garbage", True):
+        try:
+            closed = await try_close_garbage_issue(issue_data, repo_name, engine_proxy, config)
+            if closed:
+                if admin_id:
+                    await adapter.send_private_message(
+                        admin_id,
+                        f"Issue #{issue_data['number']}: {issue_data['title']} 已自动关闭（判定为垃圾）\n"
+                        f"仓库: {repo_name}",
+                    )
+                return
+        except Exception as exc:
+            logger.error("Issue #%d 垃圾检测失败: %s", issue_data["number"], exc, exc_info=True)
 
     labels: list[str] = []
 
@@ -81,11 +97,27 @@ async def handle_pr_event(
     adapter: Any,
     engine_proxy: Any,
 ) -> None:
-    """处理 PR 事件：自动代码审阅。"""
+    """处理 PR 事件：垃圾检测 → 自动代码审阅。"""
     pr_data = body["pull_request"]
     repo_name = body["repository"]["full_name"]
     pr_number = pr_data["number"]
     action = body.get("action", "")
+
+    # 0. 垃圾检测（优先执行，判定为垃圾则跳过后续流程）
+    if config.get("auto_close_garbage", True):
+        try:
+            closed = await try_close_garbage_pr(pr_data, repo_name, engine_proxy, config)
+            if closed:
+                admin_id = _resolve_admin_id(adapter)
+                if admin_id:
+                    await adapter.send_private_message(
+                        admin_id,
+                        f"PR #{pr_number}: {pr_data['title']} 已自动关闭（判定为垃圾）\n"
+                        f"仓库: {repo_name}",
+                    )
+                return
+        except Exception as exc:
+            logger.error("PR #%d 垃圾检测失败: %s", pr_number, exc, exc_info=True)
 
     # 判定审阅模式
     if action == "synchronize":

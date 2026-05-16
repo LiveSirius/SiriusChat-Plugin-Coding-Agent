@@ -31,6 +31,7 @@ class GithubAgentConfig:
     auto_label: bool = True
     auto_comment: bool = True
     auto_review: bool = True
+    auto_close_garbage: bool = True
     review_mode: str = "quick"
 
     # ── 控制台可视化 ──
@@ -48,6 +49,7 @@ class GithubAgentConfig:
             "auto_label": self.auto_label,
             "auto_comment": self.auto_comment,
             "auto_review": self.auto_review,
+            "auto_close_garbage": self.auto_close_garbage,
             "review_mode": self.review_mode,
             "console_viewer_enabled": self.console_viewer_enabled,
             "console_viewer_keep_open": self.console_viewer_keep_open,
@@ -65,6 +67,7 @@ class GithubAgentConfig:
             auto_label=_parse_bool(data.get("auto_label", True)),
             auto_comment=_parse_bool(data.get("auto_comment", True)),
             auto_review=_parse_bool(data.get("auto_review", True)),
+            auto_close_garbage=_parse_bool(data.get("auto_close_garbage", True)),
             review_mode=data.get("review_mode", "quick"),
             console_viewer_enabled=_parse_bool(data.get("console_viewer_enabled", True)),
             console_viewer_keep_open=_parse_bool(data.get("console_viewer_keep_open", False)),
