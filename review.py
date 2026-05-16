@@ -4,14 +4,15 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
-from .api import _headers
+from sirius_chat.github.client import GitHubClient, github_headers
 
 logger = logging.getLogger(__name__)
 
-_BASE = "https://api.github.com"
 _REVIEW_RETRIES = 3
+
+
+def _token(config: dict) -> str:
+    return config.get("github_pat", "")
 
 
 async def auto_review_pr(
@@ -37,15 +38,12 @@ async def auto_review_pr(
     pr_title = pr_data["title"]
     pr_body = pr_data.get("body", "")
 
-    headers = _headers(config)
-    diff_headers = {**headers, "Accept": "application/vnd.github.v3.diff"}
-
-    async with httpx.AsyncClient(headers=diff_headers, timeout=30.0) as client:
-        diff_resp = await client.get(f"{_BASE}/repos/{repo_full_name}/pulls/{pr_number}")
+    async with GitHubClient(_token(config)) as client:
+        diff_resp = await client.get(f"/repos/{repo_full_name}/pulls/{pr_number}", headers={"Accept": "application/vnd.github.v3.diff"})
         diff_content = diff_resp.text if diff_resp.status_code == 200 else ""
 
         files_resp = await client.get(
-            f"{_BASE}/repos/{repo_full_name}/pulls/{pr_number}/files",
+            f"/repos/{repo_full_name}/pulls/{pr_number}/files",
             params={"per_page": 100},
         )
         files_data = files_resp.json() if files_resp.status_code == 200 else []
@@ -133,7 +131,7 @@ DIFF:
             f"PR #{pr_number} 审阅 JSON 解析失败（{_REVIEW_RETRIES}次重试）"
         ) from last_error
 
-    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+    async with GitHubClient(_token(config)) as client:
         body_lines = [f"**自动代码审阅**\n\n{review_result.get('summary', '')}\n"]
 
         issues = review_result.get("issues", [])
@@ -165,7 +163,7 @@ DIFF:
         review_body = "\n".join(body_lines)
 
         review_resp = await client.post(
-            f"{_BASE}/repos/{repo_full_name}/pulls/{pr_number}/reviews",
+            f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
             json={"body": review_body, "event": review_event},
         )
         if review_resp.status_code in (200, 201):
@@ -191,8 +189,7 @@ async def post_inline_review_comments(
 ) -> int:
     """对 PR 的特定代码行发布行内评论。深度审阅模式使用。"""
     posted = 0
-    headers = _headers(config)
-    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+    async with GitHubClient(_token(config)) as client:
         for issue in issues:
             if not issue.get("file") or not issue.get("line"):
                 continue
@@ -201,7 +198,7 @@ async def post_inline_review_comments(
                 body += f"\n\n建议: {issue['suggestion']}"
             try:
                 resp = await client.post(
-                    f"{_BASE}/repos/{repo_full_name}/pulls/{pr_number}/comments",
+                    f"/repos/{repo_full_name}/pulls/{pr_number}/comments",
                     json={
                         "body": body,
                         "commit_id": commit_id,
@@ -242,10 +239,9 @@ async def has_existing_review(
 
     用于 synchronize 事件时判断避免重复。
     """
-    headers = _headers(config)
-    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+    async with GitHubClient(_token(config)) as client:
         resp = await client.get(
-            f"{_BASE}/repos/{repo_full_name}/pulls/{pr_number}/reviews",
+            f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
             params={"per_page": 100},
         )
         if resp.status_code != 200:

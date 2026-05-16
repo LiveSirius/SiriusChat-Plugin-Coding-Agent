@@ -7,7 +7,7 @@ import sys
 import traceback
 from typing import Any
 
-from sirius_chat.github_webhook import GitHubWebhookServer
+from sirius_chat.github import GitHubWebhookServer
 from sirius_chat.plugins import PluginBase, PluginResponse
 from sirius_chat.plugins.decorators import command
 
