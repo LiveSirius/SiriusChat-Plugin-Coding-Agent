@@ -13,6 +13,7 @@ from sirius_chat.plugins.decorators import command
 
 from .commands import handle_gh_command
 from .config import GithubAgentConfig
+from .monitor_config import MonitorConfig
 from .webhook import handle_issue_opened, handle_pr_event
 
 logger = logging.getLogger(__name__)
@@ -23,16 +24,12 @@ _plugin_dependencies = ["httpx", "GitPython"]
 class CodingAgentPlugin(PluginBase):
     _plugin_name = "coding_agent"
     _plugin_display_name = "编码助手"
-    _plugin_description = "GitHub Issue/PR 自动化管理 + Python 代码执行"
-    _plugin_version = "1.1.0"
+    _plugin_description = "GitHub Issue/PR 自动化管理 + Python 代码执行（仓库由 github_monitor 统一管理）"
+    _plugin_version = "2.0.0"
     _plugin_author = "SiriusChat"
 
     _plugin_parameters = [
-        {"name": "github_pat", "type": "string", "description": "GitHub Personal Access Token", "required": True},
-        {"name": "github_username", "type": "string", "description": "GitHub 用户名", "required": True},
-        {"name": "repos", "type": "list", "description": "绑定的仓库列表，每行一个，格式 owner/repo", "required": True},
         {"name": "webhook_port", "type": "int", "description": "Webhook 监听端口（0=自动分配）", "default": 0},
-        {"name": "webhook_secret", "type": "string", "description": "Webhook HMAC 签名密钥（可选）"},
         {"name": "webhook_public_url", "type": "string", "description": "Webhook 公网地址（如 ngrok URL）"},
         {"name": "model", "type": "string", "description": "自定义 LLM 模型名（空=使用路由）"},
         {"name": "max_retries", "type": "int", "description": "最大重试次数", "default": 3},
@@ -48,71 +45,69 @@ class CodingAgentPlugin(PluginBase):
 
     def __init__(self) -> None:
         self._gh_config: GithubAgentConfig | None = None
+        self._monitor: MonitorConfig = MonitorConfig()
         self._webhook_server: GitHubWebhookServer | None = None
         self._webhook_port: int = 0
         self._poll_task: asyncio.Task | None = None
 
     async def on_load(self) -> None:
-        """加载配置并启动 Webhook 服务（复用框架 GitHubWebhookServer）。
+        """加载配置并启动服务。
 
-        配置优先级：ctx.config（WebUI 设置） > data_store（旧兼容）
+        仓库列表和 token 从 github_monitor 的 SkillDataStore 读取，
+        用户无需重复配置。插件自身设置通过 ctx.config（WebUI）管理。
         """
-        # 从 ctx.config 读取 WebUI 设置（新方式）
         self._gh_config = GithubAgentConfig.from_dict(self.ctx.config)
 
-        # 如果 ctx.config 中没有关键配置，回退到 data_store（旧兼容）
-        if not self._gh_config.github_pat and self.ctx.data_store:
-            old_settings = self.ctx.data_store.get("github_agent_config")
-            if old_settings:
-                self._gh_config = GithubAgentConfig.from_dict(old_settings)
-                # 迁移到 ctx.config 对应的 _config.json（通过 WebUI API）
-                logger.info("从旧 data_store 迁移 github_agent_config，请在 WebUI 插件设置中保存新配置")
+        # 从 github_monitor 读取仓库和 per-repo token
+        if self.ctx.data_store:
+            self._monitor = MonitorConfig.load(self.ctx.data_store)
 
-        if self._gh_config.github_pat and self._gh_config.repos:
-            config_dict = self._build_config_dict()
-            try:
-                # 使用框架级 GitHubWebhookServer
-                self._webhook_server = GitHubWebhookServer(
-                    secret=self._gh_config.webhook_secret,
-                    host="127.0.0.1",
-                    port=self._gh_config.webhook_port,
-                )
-                self._webhook_server.set_repo_filter(
-                    lambda r: r in self._gh_config.repos
-                )
+        if not self._monitor.repo_names:
+            logger.info("github_monitor 中未配置任何仓库，等待配置后重新加载")
+            return
 
-                # 注册 Issue 处理器（仅 opened 动作）
-                adapter = self.ctx.adapter
-                engine_proxy = self.ctx.engine_proxy
-                data_store = self.ctx.data_store
+        config_dict = self._build_config_dict()
 
-                async def _on_issue(event_type: str, body: dict[str, Any]) -> None:
-                    if body.get("action") == "opened":
-                        await handle_issue_opened(body, config_dict, adapter, engine_proxy, data_store)
+        # ── Webhook 模式（收到 GitHub push 时实时触发）──
+        try:
+            self._webhook_server = GitHubWebhookServer(
+                secret=self._monitor.webhook_secret,
+                host="127.0.0.1",
+                port=self._gh_config.webhook_port,
+            )
+            self._webhook_server.set_repo_filter(
+                lambda r: r in self._monitor.repo_names
+            )
 
-                self._webhook_server.add_handler("issues", _on_issue)
+            adapter = self.ctx.adapter
+            engine_proxy = self.ctx.engine_proxy
+            data_store = self.ctx.data_store
 
-                # 注册 PR 处理器（仅 opened / synchronize 动作）
-                async def _on_pr(event_type: str, body: dict[str, Any]) -> None:
-                    action = body.get("action", "")
-                    if action in ("opened", "synchronize"):
-                        asyncio.create_task(
-                            handle_pr_event(body, config_dict, adapter, engine_proxy)
-                        )
+            async def _on_issue(event_type: str, body: dict[str, Any]) -> None:
+                if body.get("action") == "opened":
+                    await handle_issue_opened(body, config_dict, adapter, engine_proxy, data_store)
 
-                self._webhook_server.add_handler("pull_request", _on_pr)
+            self._webhook_server.add_handler("issues", _on_issue)
 
-                self._webhook_port = await self._webhook_server.start()
-                logger.info("GitHub Webhook 服务已启动: 127.0.0.1:%s", self._webhook_port)
-            except Exception as exc:
-                logger.warning("Webhook 服务启动失败（不影响插件运行）: %s", exc)
+            async def _on_pr(event_type: str, body: dict[str, Any]) -> None:
+                action = body.get("action", "")
+                if action in ("opened", "synchronize"):
+                    asyncio.create_task(
+                        handle_pr_event(body, config_dict, adapter, engine_proxy)
+                    )
 
-        # 启动 API 轮询（>0 时启用，即使 Webhook 可用也作为兜底）
+            self._webhook_server.add_handler("pull_request", _on_pr)
+
+            self._webhook_port = await self._webhook_server.start()
+            logger.info("GitHub Webhook 服务已启动: 127.0.0.1:%s", self._webhook_port)
+        except Exception as exc:
+            logger.warning("Webhook 服务启动失败（不影响插件运行）: %s", exc)
+
+        # ── API 轮询（不需要公网 IP）──
         poll_interval = self._gh_config.poll_interval_seconds
-        if self._gh_config.github_pat and self._gh_config.repos and poll_interval > 0:
+        if poll_interval > 0:
             from .poller import start_polling_loop
 
-            config_dict = self._build_config_dict()
             self._poll_task = await start_polling_loop(
                 config=config_dict,
                 adapter=self.ctx.adapter,
@@ -122,7 +117,7 @@ class CodingAgentPlugin(PluginBase):
             logger.info("API 轮询已启动（间隔 %d 秒）", poll_interval)
 
     async def on_unload(self) -> None:
-        """停止 Webhook 服务和轮询任务，释放资源。"""
+        """停止所有后台任务。"""
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -138,16 +133,19 @@ class CodingAgentPlugin(PluginBase):
                 logger.warning("停止 Webhook 服务时出错: %s", exc)
 
     def _build_config_dict(self) -> dict[str, Any]:
-        """从 GithubAgentConfig 构建传递给子模块的配置字典。"""
+        """构建传递给子模块的配置字典。
+
+        仓库列表和 per-repo token 来自 MonitorConfig，
+        github_username 从 per-repo 信息推断或留空（仅用于 git commit author）。
+        """
         if self._gh_config is None:
             return {}
         return {
-            "github_pat": self._gh_config.github_pat,
-            "github_username": self._gh_config.github_username,
+            "repos": self._monitor.repo_names,
+            "_monitor": self._monitor,
             "admin_user_id": self._resolve_admin_id(),
-            "repos": self._gh_config.repos,
             "model": self._gh_config.model,
-            "webhook_secret": self._gh_config.webhook_secret,
+            "webhook_secret": self._monitor.webhook_secret,
             "auto_label": self._gh_config.auto_label,
             "auto_comment": self._gh_config.auto_comment,
             "auto_review": self._gh_config.auto_review,
@@ -160,7 +158,6 @@ class CodingAgentPlugin(PluginBase):
         }
 
     def _resolve_admin_id(self) -> str:
-        """从 adapter 读取 root 用户 ID，不要求用户手动配置。"""
         adapter = getattr(self.ctx, "adapter", None)
         if adapter is None:
             return ""
@@ -179,10 +176,8 @@ class CodingAgentPlugin(PluginBase):
         examples=["/py print('Hello World')", "/py 1+1"],
     )
     async def execute_python(self, code: str) -> PluginResponse:
-        """执行单行 Python 代码，捕获 stdout 并返回执行结果。"""
         old_stdout = sys.stdout
         sys.stdout = captured = io.StringIO()
-
         try:
             exec(code)
             output = captured.getvalue().strip()
@@ -202,14 +197,13 @@ class CodingAgentPlugin(PluginBase):
         examples=["/gh <task_id> auto", "/gh review <repo_index> <pr_number> [quick|deep]"],
     )
     async def github_agent(self, command_args: str = "") -> PluginResponse:
-        """处理 GitHub Agent 相关指令。"""
-        if not self._gh_config or not self._gh_config.github_pat:
-            return PluginResponse.fail("GitHub Agent 未配置，请先设置 github_pat")
+        if not self._monitor.repo_names:
+            return PluginResponse.fail("未在 github_monitor 中配置仓库，请在 WebUI 的 SKILL 设置中配置")
 
         config_dict = {
             **self._build_config_dict(),
-            "max_retries": self._gh_config.max_retries,
-            "test_command": self._gh_config.test_command,
+            "max_retries": self._gh_config.max_retries if self._gh_config else 3,
+            "test_command": self._gh_config.test_command if self._gh_config else "pytest",
         }
 
         result = await handle_gh_command(

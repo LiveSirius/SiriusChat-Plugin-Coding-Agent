@@ -54,7 +54,8 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
 
     from git import Repo
 
-    username = config.get("github_username", "")
+    # github_username 从仓库 owner 自动推导
+    username = repo_name.split("/")[0] if "/" in repo_name else config.get("github_username", "")
 
     # 1. Fork（幂等）
     await fork_repo(repo_name, config)
@@ -62,8 +63,9 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     # 2. Sync upstream
     await sync_fork(repo_name, config)
 
-    # 3. Clone
-    pat = config.get("github_pat", "")
+    # 3. Clone（PAT 来自 per-repo token 或全局 fallback）
+    from .api import _token_for_repo
+    pat = _token_for_repo(config, repo_name)
     fork_url = f"https://{pat}@github.com/{username}/{repo_name.split('/')[-1]}.git"
     if not (task_dir / ".git").exists():
         proc = await asyncio.create_subprocess_exec(
@@ -419,7 +421,7 @@ async def _finalize_and_create_pr(
     repo.git.add(".")
 
     # 设置仓库级 git 用户身份，确保 GitHub 将提交归因于 AI 账户而非本地用户
-    username = config.get("github_username", "")
+    username = repo_name.split("/")[0] if "/" in repo_name else config.get("github_username", "")
     with repo.config_writer() as cw:
         cw.set_value("user", "name", username)
         cw.set_value("user", "email", f"{username}@users.noreply.github.com")

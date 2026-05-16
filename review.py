@@ -11,7 +11,13 @@ logger = logging.getLogger(__name__)
 _REVIEW_RETRIES = 3
 
 
-def _token(config: dict) -> str:
+def _token(config: dict, repo: str = "") -> str:
+    """获取 API token。优先 per-repo token，否则全局 github_pat。"""
+    monitor = config.get("_monitor")
+    if monitor is not None and repo:
+        t = monitor.get_token(repo)
+        if t:
+            return t
     return config.get("github_pat", "")
 
 
@@ -38,7 +44,7 @@ async def auto_review_pr(
     pr_title = pr_data["title"]
     pr_body = pr_data.get("body", "")
 
-    async with GitHubClient(_token(config)) as client:
+    async with GitHubClient(_token(config, repo_full_name)) as client:
         diff_resp = await client.get(f"/repos/{repo_full_name}/pulls/{pr_number}", headers={"Accept": "application/vnd.github.v3.diff"})
         diff_content = diff_resp.text if diff_resp.status_code == 200 else ""
 
@@ -131,7 +137,7 @@ DIFF:
             f"PR #{pr_number} 审阅 JSON 解析失败（{_REVIEW_RETRIES}次重试）"
         ) from last_error
 
-    async with GitHubClient(_token(config)) as client:
+    async with GitHubClient(_token(config, repo_full_name)) as client:
         body_lines = [f"**自动代码审阅**\n\n{review_result.get('summary', '')}\n"]
 
         issues = review_result.get("issues", [])
@@ -189,7 +195,7 @@ async def post_inline_review_comments(
 ) -> int:
     """对 PR 的特定代码行发布行内评论。深度审阅模式使用。"""
     posted = 0
-    async with GitHubClient(_token(config)) as client:
+    async with GitHubClient(_token(config, repo_full_name)) as client:
         for issue in issues:
             if not issue.get("file") or not issue.get("line"):
                 continue
@@ -239,7 +245,7 @@ async def has_existing_review(
 
     用于 synchronize 事件时判断避免重复。
     """
-    async with GitHubClient(_token(config)) as client:
+    async with GitHubClient(_token(config, repo_full_name)) as client:
         resp = await client.get(
             f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
             params={"per_page": 100},
