@@ -87,6 +87,16 @@ async def get_pr_reviews(repo: str, pr_number: int, config: dict[str, Any]) -> l
 # ═══════════════════════════════════════════════════════════════════════
 
 
+async def get_default_branch(repo: str, config: dict[str, Any]) -> str:
+    """获取仓库的默认分支名（main/master/...）。"""
+    async with GitHubClient(_token_for_repo(config, repo)) as client:
+        result = await client.get_json(f"/repos/{repo}")
+        if isinstance(result, dict):
+            return str(result.get("default_branch", "main"))
+        logger.warning("获取默认分支失败 %s，fallback main", repo)
+        return "main"
+
+
 async def fork_repo(repo: str, config: dict[str, Any]) -> dict[str, Any] | None:
     async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(f"/repos/{repo}/forks")
@@ -101,10 +111,11 @@ async def fork_repo(repo: str, config: dict[str, Any]) -> dict[str, Any] | None:
 
 async def sync_fork(repo: str, config: dict[str, Any]) -> bool:
     username = repo.split("/")[0] if "/" in repo else config.get("github_username", "")
+    default_branch = await get_default_branch(repo, config)
     async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(
             f"/repos/{username}/{repo.split('/')[-1]}/merge-upstream",
-            json={"branch": "main"},
+            json={"branch": default_branch},
         )
         if resp.status_code == 200:
             return True

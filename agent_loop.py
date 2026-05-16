@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .api import create_pr, fork_repo, sync_fork
+from .api import create_pr, fork_repo, sync_fork, get_default_branch
 from .skills import (
     ToolRegistry,
     build_default_registry,
@@ -432,7 +432,8 @@ async def _finalize_and_create_pr(
     repo.git.push("origin", f"fix-issue-{issue_number}")
 
     pr_title = f"Fix #{issue_number}: {issue_title[:72]}"
-    diff_full = repo.git.diff("main")
+    default_branch = await get_default_branch(repo_name, config)
+    diff_full = repo.git.diff(default_branch)
     changelog = await generate_changelog(diff_full[:6000], issue_data, engine_proxy)
     pr_body = f"## 自动修复\n\n### 变更摘要\n{changelog}\n\nCloses #{issue_number}"
 
@@ -441,7 +442,7 @@ async def _finalize_and_create_pr(
         pr_title,
         pr_body,
         f"{username}:fix-issue-{issue_number}",
-        "main",
+        default_branch,
         config,
     )
     pr_url = pr_result.get("html_url", "") if pr_result else ""
