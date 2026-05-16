@@ -122,6 +122,10 @@ class CodingAgentPlugin(PluginBase):
             issue_number = issue.get("number", 0)
             if not issue_number:
                 return
+            comment_body = comment.get("body", "")
+            if not comment_body:
+                return
+
             # 查找已有 tracker
             all_data = self.ctx.data_store.all() if hasattr(self.ctx.data_store, "all") else {}
             from .tracker import _PREFIX
@@ -130,16 +134,31 @@ class CodingAgentPlugin(PluginBase):
                     continue
                 data = raw if isinstance(raw, dict) else {}
                 if data.get("repo") == repo_name and data.get("issue_number") == issue_number:
+                    status = data.get("status", "")
+                    # 已终态：不再处理
+                    if status in ("CLOSED", "FIXING", "DONE", "ABORTED"):
+                        logger.debug("回灌评论跳过: Issue #%d 已处于终态 %s", issue_number, status)
+                        return
+                    # 跳过 AI 自己的评论（已在 conversation 中存在）
+                    assistant_bodies = {
+                        m["content"] for m in data.get("conversation", [])
+                        if m.get("role") == "assistant"
+                    }
+                    if comment_body.strip() in assistant_bodies:
+                        logger.debug("回灌评论跳过: Issue #%d 这条是 AI 自己的评论", issue_number)
+                        return
+                    # 注入用户评论
                     user_login = comment.get("user", {}).get("login", "unknown")
-                    comment_body = comment.get("body", "")
-                    if comment_body:
-                        data.setdefault("conversation", []).append({
-                            "role": "user", "content": f"@{user_login}: {comment_body}", "timestamp": __import__("time").time()
-                        })
-                        data["last_activity"] = __import__("time").time()
+                    data.setdefault("conversation", []).append({
+                        "role": "user", "content": f"@{user_login}: {comment_body}",
+                        "timestamp": __import__("time").time(),
+                    })
+                    data["last_activity"] = __import__("time").time()
+                    # 仅当当前在等待回复时才切到信息收集状态
+                    if status == "AWAITING_RESPONSE":
                         data["status"] = "GATHERING_INFO"
-                        self.ctx.data_store.set(key, data)
-                        logger.info("回灌评论到 tracker: Issue #%d", issue_number)
+                    self.ctx.data_store.set(key, data)
+                    logger.info("回灌评论到 tracker: Issue #%d @%s", issue_number, user_login)
                     return
             # 无 tracker → 新建
             self._tracker.enqueue(

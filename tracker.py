@@ -208,6 +208,10 @@ class IssueTracker:
         logger.debug("Tracker: 处理 Issue #%d status=%s q=%d conv=%d",
                      state.issue_number, state.status, state.questions_asked, len(state.conversation))
 
+        # 终态：不做任何处理（防御性检查，list_active 已过滤但以防 data_store 被外部修改）
+        if state.status in ("CLOSED", "FIXING", "DONE", "ABORTED"):
+            return
+
         # 1. 拉取新评论
         await self._fetch_new_comments(state)
 
