@@ -86,7 +86,7 @@ class CodingAgentPlugin(PluginBase):
         self._tracker = IssueTracker(
             data_store=self.ctx.data_store,
             config=config_dict,
-            engine_proxy=self.ctx.engine_proxy,
+            engine_proxy=self.ctx.engine,
             adapter=self.ctx.adapter,
         )
         set_tracker(self._tracker)
@@ -97,13 +97,13 @@ class CodingAgentPlugin(PluginBase):
             if repo_name not in self._effective_repos:
                 return
             await handle_issue_opened(body, config_dict, self.ctx.adapter,
-                                       self.ctx.engine_proxy, self.ctx.data_store)
+                                       self.ctx.engine, self.ctx.data_store)
 
         async def _on_pr_event(body: dict[str, Any], repo_name: str, action: str) -> None:
             if repo_name not in self._effective_repos:
                 return
             asyncio.create_task(
-                handle_pr_event(body, config_dict, self.ctx.adapter, self.ctx.engine_proxy)
+                handle_pr_event(body, config_dict, self.ctx.adapter, self.ctx.engine)
             )
 
         register_issue_handler(_on_issue_opened)
@@ -231,7 +231,7 @@ class CodingAgentPlugin(PluginBase):
             ctx=self.ctx,
             command_args=command_args,
             config=config_dict,
-            engine_proxy=self.ctx.engine_proxy,
+            engine_proxy=self.ctx.engine,
             data_store=self.ctx.data_store,
         )
 
