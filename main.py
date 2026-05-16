@@ -41,7 +41,7 @@ class CodingAgentPlugin(PluginBase):
         {"name": "active_repos", "type": "list", "description": "生效仓库（owner/repo，留空=monitor全部）"},
         {"name": "model", "type": "string", "description": "自定义 LLM 模型名"},
         {"name": "max_retries", "type": "int", "description": "最大重试次数", "default": 3},
-        {"name": "max_questions", "type": "int", "description": "信息收集最大追问次数", "default": 3},
+        {"name": "max_questions", "type": "int", "description": "信息收集最大追问次数", "default": 12},
         {"name": "test_command", "type": "string", "description": "测试命令", "default": "pytest"},
         {"name": "auto_label", "type": "boolean", "description": "启用 Issue 自动标签", "default": True},
         {"name": "auto_review", "type": "boolean", "description": "启用 PR 自动审阅", "default": True},
@@ -252,7 +252,7 @@ class CodingAgentPlugin(PluginBase):
         config_dict = {
             **self._build_config_dict(),
             "max_retries": self._gh_config.max_retries if self._gh_config else 3,
-            "max_questions": self._gh_config.max_questions if self._gh_config else 3,
+            "max_questions": self._gh_config.max_questions if self._gh_config else 12,
             "test_command": self._gh_config.test_command if self._gh_config else "pytest",
         }
 

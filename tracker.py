@@ -279,7 +279,7 @@ class IssueTracker:
         self._save(state)
 
     async def _try_gather(self, state: IssueState) -> None:
-        max_q = self._config.get("max_questions", 3)
+        max_q = self._config.get("max_questions", 12)
         code_context: dict[str, str] = {}
         fetched_files: set[str] = set()
 

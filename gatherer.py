@@ -65,7 +65,7 @@ async def analyze_and_gather(
 
 def _build_gather_prompt(state: Any, code_context: dict[str, str] | None = None) -> str:
     conv_lines: list[str] = []
-    for m in state.conversation[-10:]:
+    for m in state.conversation:
         role_label = "用户" if m["role"] == "user" else "AI"
         conv_lines.append(f"[{role_label}] {m['content'][:800]}")
     conv_text = "\n\n".join(conv_lines) if conv_lines else "（暂无对话）"
