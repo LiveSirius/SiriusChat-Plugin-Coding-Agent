@@ -105,12 +105,12 @@ class IssueTracker:
         data_store: Any,
         config: dict[str, Any],
         engine_proxy: Any,
-        adapter: Any,
+        plugin_ctx: Any,
     ) -> None:
         self._store = data_store
         self._config = config
         self._engine_proxy = engine_proxy
-        self._adapter = adapter
+        self._plugin_ctx = plugin_ctx
         self._task: asyncio.Task | None = None
         self._running = False
         self._engine_unbound_logged = False
@@ -118,6 +118,11 @@ class IssueTracker:
     def _engine_ready(self) -> bool:
         engine = getattr(self._engine_proxy, "get_engine", lambda: None)()
         return engine is not None
+
+    @property
+    def _adapter(self) -> Any:
+        """动态获取 adapter（NapCat 连接后才注入到 ctx）。"""
+        return getattr(self._plugin_ctx, "adapter", None)
 
     def enqueue(self, issue_number: int, repo: str, title: str, body: str, labels: list[str]) -> str:
         import uuid

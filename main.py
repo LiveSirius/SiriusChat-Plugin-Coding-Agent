@@ -87,7 +87,7 @@ class CodingAgentPlugin(PluginBase):
             data_store=self.ctx.data_store,
             config=config_dict,
             engine_proxy=self.ctx.engine,
-            adapter=self.ctx.adapter,
+            plugin_ctx=self.ctx,
         )
         set_tracker(self._tracker)
         await self._tracker.start()
