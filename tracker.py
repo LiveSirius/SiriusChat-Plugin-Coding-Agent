@@ -271,17 +271,18 @@ class IssueTracker:
                 await self._notify_developer(state, result)
                 return
 
-            # 追问
+            # 追问 — 人格化后再发布
             question = result.get("question", "")
             if question:
+                persona_question = await self._persona_question(state, question)
                 from .api import post_issue_comment
-                await post_issue_comment(state.repo, state.issue_number, question, self._config)
-                state.add_conversation("assistant", question)
+                await post_issue_comment(state.repo, state.issue_number, persona_question, self._config)
+                state.add_conversation("assistant", persona_question)
                 state.questions_asked += 1
                 state.status = "AWAITING_RESPONSE"
                 self._save(state)
                 logger.info("Tracker: Issue #%d 追问 (%d): %s",
-                            state.issue_number, state.questions_asked, question[:80])
+                            state.issue_number, state.questions_asked, persona_question[:80])
             return
 
     async def _close_issue(self, state: IssueState, reason: str) -> None:
@@ -299,24 +300,51 @@ class IssueTracker:
 
         admin_id = self._config.get("admin_user_id", "")
         if admin_id and self._adapter:
-            await self._adapter.send_private_message(
-                admin_id,
-                f"Issue #{state.issue_number}: {state.title} 已自动关闭\n"
-                f"仓库: {state.repo}\n"
-                f"原因: {reason}",
-            )
+            try:
+                prompt = f"""以你的角色身份通知管理员一个 Issue 已自动关闭。
+
+Issue #{state.issue_number}: {state.title}
+原因: {reason}
+
+用角色口吻简述，1句话。"""
+                persona_msg = await self._engine_proxy.generate_raw(prompt, inject_persona=True)
+                msg = persona_msg.strip() or f"Issue #{state.issue_number} 已自动关闭: {reason}"
+            except Exception:
+                msg = f"Issue #{state.issue_number}: {state.title} 已自动关闭\n仓库: {state.repo}\n原因: {reason}"
+            await self._adapter.send_private_message(admin_id, msg)
+
+    async def _persona_question(self, state: IssueState, base_question: str) -> str:
+        """将功能性追问转为角色化表达（inject_persona=True）。"""
+        try:
+            prompt = f"""你正在 GitHub Issue 下以你的角色身份追问用户一个问题。
+
+Issue #{state.issue_number}: {state.title}
+
+要问的核心问题: {base_question}
+
+请用你的角色口吻重新表述这个问题，保持友好、自然。只输出最终问题正文。"""
+            result = await self._engine_proxy.generate_raw(prompt, inject_persona=True)
+            return result.strip() or base_question
+        except Exception:
+            return base_question
 
     async def _notify_developer(self, state: IssueState, result: dict[str, Any]) -> None:
         admin_id = self._config.get("admin_user_id", "")
         if not admin_id or not self._adapter:
             return
         approach = result.get("approach", "待分析")
-        msg = (
-            f"[READY] Issue #{state.issue_number}: {state.title}\n"
-            f"仓库: {state.repo}\n"
-            f"理解: {state.gathered_summary}\n"
-            f"方案: {approach}\n\n"
-            f"回复 /gh {state.task_id} auto 启动自动修复"
-        )
+        try:
+            prompt = f"""以你的角色身份向项目管理员发送一条简短通知。
+
+Issue #{state.issue_number}: {state.title}
+理解: {state.gathered_summary}
+修复方案: {approach}
+任务ID: {state.task_id}
+
+用你的角色口吻告诉管理员这个 Issue 已就绪，回复 /gh {state.task_id} auto 即可启动修复。1-2句话。"""
+            persona_msg = await self._engine_proxy.generate_raw(prompt, inject_persona=True)
+            msg = persona_msg.strip() or f"[READY] Issue #{state.issue_number} 信息已就绪，回复 /gh {state.task_id} auto 启动修复"
+        except Exception:
+            msg = f"[READY] Issue #{state.issue_number}: {state.title}\n仓库: {state.repo}\n回复 /gh {state.task_id} auto 启动自动修复"
         await self._adapter.send_private_message(admin_id, msg)
         logger.info("Tracker: Issue #%d 已通知 developer", state.issue_number)
