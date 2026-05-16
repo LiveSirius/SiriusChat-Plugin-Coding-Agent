@@ -304,10 +304,12 @@ async def close_issue(
     issue_number: int,
     comment_body: str | None = None,
     config: dict[str, Any] | None = None,
+    state_reason: str = "not_planned",
 ) -> bool:
     """关闭 Issue，可选附带一条关闭说明评论。
 
     先发表评论（若提供），再 PATCH state=closed。
+    state_reason: "completed" | "not_planned"
     """
     if config is None:
         config = {}
@@ -319,7 +321,7 @@ async def close_issue(
             )
         resp = await client.patch(
             f"/repos/{repo}/issues/{issue_number}",
-            json={"state": "closed"},
+            json={"state": "closed", "state_reason": state_reason},
         )
         if resp.status_code == 200:
             logger.info("已关闭 Issue %s #%d", repo, issue_number)
