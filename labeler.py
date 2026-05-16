@@ -196,11 +196,11 @@ async def adjust_labels_for_issue(
     existing_labels: list[str],
     config: dict,
     engine_proxy: Any,
-) -> list[str]:
-    """信息收集过程中，根据对话进展重新评估标签。
+) -> list[str] | None:
+    """信息收集过程中，根据对话进展重新评估所有标签。
 
-    仅在对话中出现新信息（优先级变化、模块澄清等）时返回增量标签。
-    返回新增标签列表（不重复已有标签）。
+    返回该 Issue 当前应拥有的完整标签列表，或者 None（保持现有标签不变）。
+    调用方负责用 set_all_labels_to_issue 全量替换。
     """
     recent_msgs = conversation[-6:] if len(conversation) > 6 else conversation
     conv_text = "\n".join(
@@ -209,42 +209,45 @@ async def adjust_labels_for_issue(
     )
     existing_str = ", ".join(existing_labels) if existing_labels else "（无）"
 
-    prompt = f"""根据 Issue 对话进展，判断是否需要补充标签。
+    prompt = f"""根据 Issue 对话进展，输出该 Issue 当前应有的完整标签列表。
 
 Issue #{issue_number}: {title}
 
-已有标签: {existing_str}
+当前已有标签: {existing_str}
 
 最近对话:
 {conv_text}
 
 可用标签: type:bug|feature|docs|question|refactor,
 priority:critical|high|medium|low, difficulty:easy|medium|hard,
-area:core|api|ui|docs|tests|config
+area:core|api|ui|docs|tests|config,
+status:needs-triage|status:good-first-issue|status:help-wanted
 
-重要规则：
-1. 不要添加与已有标签功能重复的标签
-2. 只有当对话中出现新信息明确指向某个新标签时才添加
-3. 如果已有标签已经足够覆盖当前对话内容，输出空数组
-4. 同一维度（type/priority/difficulty）已有标签时不再添加同维度标签
+规则：
+1. 每个维度（type/priority/difficulty）最多1个标签
+2. area 按需添加，不重复
+3. 对话中澄清了问题类型时应更新 type 标签
+4. 对话未提供新信息时保持原有标签不变
+5. 必须包含 status:needs-triage（除非主动添加其他 status）
 
 输出严格 JSON:
-{{"add_labels": ["标签1", ...], "reason": "简短理由"}}"""
+{{"labels": ["标签1", "标签2", ...], "reason": "简短理由"}}"""
 
     last_error = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             result = await engine_proxy.generate_raw(prompt, inject_persona=False, json_mode=True)
             data = json.loads(_extract_json_candidates(result.strip())[0])
-            labels = data.get("add_labels", [])
+            labels = data.get("labels", [])
             if isinstance(labels, list) and labels:
-                logger.info("Issue #%d 补充标签建议: %s", issue_number, labels)
+                logger.info("Issue #%d 标签建议: %s (当前: %s)", issue_number, labels, existing_labels)
                 valid = {"type:bug", "type:feature", "type:docs", "type:question", "type:refactor",
                          "priority:critical", "priority:high", "priority:medium", "priority:low",
                          "difficulty:easy", "difficulty:medium", "difficulty:hard",
-                         "area:core", "area:api", "area:ui", "area:docs", "area:tests", "area:config"}
+                         "area:core", "area:api", "area:ui", "area:docs", "area:tests", "area:config",
+                         "status:needs-triage", "status:good-first-issue", "status:help-wanted"}
                 return [l for l in labels if l in valid]
-            return []
+            return list(existing_labels)
         except Exception as exc:
             last_error = exc
             if attempt < _MAX_RETRIES:
@@ -252,4 +255,4 @@ area:core|api|ui|docs|tests|config
             else:
                 logger.debug("标签调整 %d 次全部失败: %s", _MAX_RETRIES, exc)
 
-    return []
+    return list(existing_labels)

@@ -262,11 +262,11 @@ class IssueTracker:
                     state.issue_number, state.repo, state.title, state.conversation,
                     state.labels, self._config, self._engine_proxy,
                 )
-                if new_labels:
-                    from .api import add_labels_to_issue
-                    await add_labels_to_issue(state.repo, state.issue_number, new_labels, self._config)
-                    state.labels = list(set(state.labels) | set(new_labels))
-                    logger.info("Tracker: Issue #%d 补充标签 %s", state.issue_number, new_labels)
+                if new_labels is not None and set(new_labels) != set(state.labels):
+                    from .api import set_all_labels_to_issue
+                    await set_all_labels_to_issue(state.repo, state.issue_number, new_labels, self._config)
+                    state.labels = new_labels
+                    logger.info("Tracker: Issue #%d 标签更新 → %s", state.issue_number, new_labels)
             except Exception as exc:
                 logger.debug("Tracker: Issue #%d 标签调整失败: %s", state.issue_number, exc)
 

@@ -52,6 +52,7 @@ class CodingAgentPlugin(PluginBase):
     ]
 
     def __init__(self) -> None:
+        super().__init__()
         self._gh_config: GithubAgentConfig | None = None
         self._monitor: MonitorConfig = MonitorConfig()
         self._effective_repos: list[str] = []

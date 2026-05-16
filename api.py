@@ -259,6 +259,40 @@ async def add_labels_to_issue(
         return resp.status_code == 200
 
 
+async def set_all_labels_to_issue(
+    repo: str,
+    issue_number: int,
+    labels: list[str],
+    config: dict[str, Any],
+) -> bool:
+    """全量替换 Issue 标签。先删除全部已有标签，再添加新标签。"""
+    from urllib.parse import quote
+
+    existing = await get_issue_labels(repo, issue_number, config)
+    old_names = [lb.get("name", "") for lb in existing if lb.get("name", "")]
+    for name in old_names:
+        async with GitHubClient(_write_token_for_repo(config, repo)) as client:
+            resp = await client.delete(f"/repos/{repo}/issues/{issue_number}/labels/{quote(name, safe='')}")
+            if resp.status_code not in (200, 204):
+                logger.debug("删除标签 %s 失败: %d", name, resp.status_code)
+    if labels:
+        return await add_labels_to_issue(repo, issue_number, labels, config)
+    return True
+
+
+async def get_issue_labels(
+    repo: str,
+    issue_number: int,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """获取某个 Issue 当前所有标签。"""
+    async with GitHubClient(_token_for_repo(config, repo)) as client:
+        resp = await client.get(f"/repos/{repo}/issues/{issue_number}/labels")
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+
+
 async def post_issue_comment(
     repo: str,
     issue_number: int,
