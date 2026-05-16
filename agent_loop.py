@@ -426,7 +426,8 @@ async def _finalize_and_create_pr(
     username = _resolve_github_username(repo_name, config)
     with repo.config_writer() as cw:
         cw.set_value("user", "name", username)
-        cw.set_value("user", "email", f"{username}@users.noreply.github.com")
+        email = config.get("github_email", "") or f"{username}@users.noreply.github.com"
+        cw.set_value("user", "email", email)
 
     issue_title = issue_data.get("title", f"Fix issue #{issue_number}")
     repo.index.commit(f"Auto-fix issue #{issue_number}: {issue_title[:60]}")

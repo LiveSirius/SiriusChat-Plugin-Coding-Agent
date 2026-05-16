@@ -22,6 +22,7 @@ class GithubAgentConfig:
     # ── 写操作 Token（与 github_monitor 的读 token 分离）──
     github_write_token: str = ""
     github_username: str = ""
+    github_email: str = ""
 
     # ── Agent 循环 ──
     max_retries: int = 3
@@ -45,6 +46,7 @@ class GithubAgentConfig:
             "active_repos": self.active_repos,
             "github_write_token": _mask_secret(self.github_write_token),
             "github_username": self.github_username,
+            "github_email": self.github_email,
             "workspace_dir": str(self.workspace_dir),
             "max_retries": self.max_retries,
             "test_command": self.test_command,
@@ -65,6 +67,7 @@ class GithubAgentConfig:
             active_repos=_parse_list(data.get("active_repos", [])),
             github_write_token=data.get("github_write_token", ""),
             github_username=data.get("github_username", ""),
+            github_email=data.get("github_email", ""),
             workspace_dir=Path(data.get("workspace_dir", "data/github_workspace")),
             max_retries=int(data.get("max_retries", 3)),
             test_command=data.get("test_command", "pytest"),
