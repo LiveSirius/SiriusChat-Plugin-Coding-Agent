@@ -7,7 +7,11 @@ import sys
 import traceback
 from typing import Any
 
-from sirius_chat.github.event_bridge import register_issue_handler, register_pr_handler
+from sirius_chat.github.event_bridge import (
+    register_issue_handler,
+    register_pr_handler,
+    set_issue_repos,
+)
 from sirius_chat.plugins import PluginBase, PluginResponse
 from sirius_chat.plugins.decorators import command
 
@@ -75,6 +79,8 @@ class CodingAgentPlugin(PluginBase):
         if not self._effective_repos:
             logger.info("active_repos 过滤后无生效仓库，跳过事件注册")
             return
+
+        set_issue_repos(set(self._effective_repos))
 
         config_dict = self._build_config_dict()
 
