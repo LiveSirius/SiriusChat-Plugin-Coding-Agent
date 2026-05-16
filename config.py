@@ -9,13 +9,11 @@ from typing import Any
 class GithubAgentConfig:
     """GitHub Agent 插件配置模型。
 
-    仓库列表和 per-repo token 由 github_monitor SKILL 统一管理，
-    插件通过 monitor_config.MonitorConfig 自动读取，无需重复配置。
+    仓库列表和事件检测由 github_monitor SKILL 统一管理，
+    插件通过 event_bridge 接收事件 + monitor_config 读取配置。
     """
 
     # ── 插件自身设置 ──
-    webhook_port: int = 0
-    webhook_public_url: str = ""
     workspace_dir: Path = Path("data/github_workspace")
 
     # ── 生效仓库过滤（空=全部）──
@@ -39,13 +37,8 @@ class GithubAgentConfig:
     console_viewer_enabled: bool = True
     console_viewer_keep_open: bool = False
 
-    # ── 轮询 ──
-    poll_interval_seconds: int = 60
-
     def to_dict(self) -> dict[str, Any]:
         return {
-            "webhook_port": self.webhook_port,
-            "webhook_public_url": self.webhook_public_url,
             "active_repos": self.active_repos,
             "github_write_token": _mask_secret(self.github_write_token),
             "workspace_dir": str(self.workspace_dir),
@@ -58,14 +51,11 @@ class GithubAgentConfig:
             "review_mode": self.review_mode,
             "console_viewer_enabled": self.console_viewer_enabled,
             "console_viewer_keep_open": self.console_viewer_keep_open,
-            "poll_interval_seconds": self.poll_interval_seconds,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GithubAgentConfig:
         return cls(
-            webhook_port=int(data.get("webhook_port", 0)),
-            webhook_public_url=data.get("webhook_public_url", ""),
             active_repos=_parse_list(data.get("active_repos", [])),
             github_write_token=data.get("github_write_token", ""),
             workspace_dir=Path(data.get("workspace_dir", "data/github_workspace")),
@@ -78,7 +68,6 @@ class GithubAgentConfig:
             review_mode=data.get("review_mode", "quick"),
             console_viewer_enabled=_parse_bool(data.get("console_viewer_enabled", True)),
             console_viewer_keep_open=_parse_bool(data.get("console_viewer_keep_open", False)),
-            poll_interval_seconds=int(data.get("poll_interval_seconds", 60)),
         )
 
 
