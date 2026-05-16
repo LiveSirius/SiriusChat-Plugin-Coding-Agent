@@ -1,7 +1,8 @@
 """LLM 驱动的信息收集与分析。
 
-analyze_and_gather() 检查 Issue 的对话历史，判断信息是否充分，
-不足则生成追问，就绪则输出理解和方案。
+analyze_and_gather() 检查 Issue 对话历史，判断信息充分度。
+支持三类决策：ask（追问）、ready（就绪）、close（关单）。
+支持请求查看指定文件以辅助分析。
 """
 
 from __future__ import annotations
@@ -17,18 +18,26 @@ _MAX_RETRIES = 3
 async def analyze_and_gather(
     state: Any,
     engine_proxy: Any,
+    code_context: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """分析 Issue 对话，判定信息就绪度。
+    """分析 Issue 对话，判定下一步动作。
+
+    Args:
+        state: IssueState 实例
+        engine_proxy: LLM 引擎代理
+        code_context: {path: content} 额外代码上下文
 
     Returns:
         {
-            "ready": bool,
-            "understanding": str,     # 模型对问题的理解
-            "approach": str,          # 提议的修复方案（仅 ready=true）
-            "question": str,          # 追问内容（仅 ready=false）
+            "action": "ask" | "ready" | "close",
+            "understanding": str,
+            "approach": str,
+            "question": str,
+            "close_reason": str,
+            "look_at_files": [str],
         }
     """
-    prompt = _build_gather_prompt(state)
+    prompt = _build_gather_prompt(state, code_context)
     result_text = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -42,29 +51,29 @@ async def analyze_and_gather(
                 logger.error("gather %d 次全部失败", _MAX_RETRIES)
 
     if not result_text:
-        return _fallback_ready(state)
+        return _fallback_result(state)
 
     parsed = _parse_gather_result(result_text)
     if parsed is None:
-        return _fallback_ready(state)
+        return _fallback_result(state)
     return parsed
 
 
-def _build_gather_prompt(state: Any) -> str:
+def _build_gather_prompt(state: Any, code_context: dict[str, str] | None = None) -> str:
     conv_lines: list[str] = []
     for m in state.conversation[-10:]:
         role_label = "用户" if m["role"] == "user" else "AI"
         conv_lines.append(f"[{role_label}] {m['content'][:800]}")
     conv_text = "\n\n".join(conv_lines) if conv_lines else "（暂无对话）"
 
-    return f"""你正在分析一个 GitHub Issue，判断目前掌握的信息是否足以开始修复。
+    code_section = ""
+    if code_context:
+        code_parts = []
+        for path, content in code_context.items():
+            code_parts.append(f"```\n# {path}\n{content[:3000]}\n```")
+        code_section = "\n\n已查看的代码文件:\n" + "\n\n".join(code_parts)
 
-判断标准：
-1. 问题描述是否足够清晰（症状、期望行为、复现步骤）
-2. 如果涉及代码错误，是否有错误日志/堆栈
-3. 如果涉及功能变更，是否有明确的需求边界
-4. 交互了几轮后是否已经澄清了核心疑问
-5. 如果 issue 打开后没有任何额外互动且描述非常模糊，需要先追问
+    return f"""你正在管理一个 GitHub Issue。请判断下一步应该做什么。
 
 Issue #{state.issue_number}: {state.title}
 
@@ -72,13 +81,32 @@ Issue #{state.issue_number}: {state.title}
 {conv_text}
 
 已追问次数: {state.questions_asked}
+{code_section}
 
-请以严格的 JSON 格式输出，不要包含其他内容：
+请选择以下 action 之一：
+- "ask": 信息不足，需要追问用户
+- "ready": 信息充足，可以开始修复
+- "close": 应关闭此 Issue（已解决、重复、无效、用户放弃等）
+
+关闭判定标准：
+1. 用户在对话中明确表示问题已解决或无需求
+2. Issue 本身是重复的，已在其他 Issue 中处理
+3. 用户多次不回复且信息始终不足（已追问 >= 2 次）
+4. Issue 明确属于项目范围外且无法转为有效需求
+5. 纯垃圾/无效内容（注意：closer.py 已经处理了明显的垃圾，
+   这里主要关注对话过程中发现的应关闭情形）
+
+如果需要查看特定文件来辅助理解问题，设置 look_at_files。
+每轮最多请求 3 个文件，路径相对于仓库根目录（如 "src/main.py"）。
+
+请以严格的 JSON 格式输出：
 {{
-    "ready": true或false,
-    "understanding": "你对问题的理解（1-2句，中文）",
-    "approach": "如果 ready=true，简述修复方案（1-2句）；否则留空",
-    "question": "如果 ready=false，生成一条将在 Issue 下公开发表的追问（80-150字，友好，一次只问1-2个关键点）；否则留空"
+    "action": "ask" | "ready" | "close",
+    "understanding": "你对问题的理解（1-2句中文）",
+    "approach": "如果 action=ready，简述修复方案；否则留空",
+    "question": "如果 action=ask，生成追问（80-150字，友好）；否则留空",
+    "close_reason": "如果 action=close，关闭理由（50字内）；否则留空",
+    "look_at_files": ["path/to/file.py", ...]
 }}"""
 
 
@@ -89,12 +117,14 @@ def _parse_gather_result(text: str) -> dict[str, Any] | None:
         if line.startswith("{"):
             try:
                 data = _json.loads(line)
-                if isinstance(data, dict) and "ready" in data:
+                if isinstance(data, dict) and "action" in data:
                     return {
-                        "ready": bool(data.get("ready", False)),
+                        "action": str(data.get("action", "ask")),
                         "understanding": str(data.get("understanding", "")),
                         "approach": str(data.get("approach", "")),
                         "question": str(data.get("question", "")),
+                        "close_reason": str(data.get("close_reason", "")),
+                        "look_at_files": _parse_file_list(data.get("look_at_files", [])),
                     }
             except (_json.JSONDecodeError, ValueError):
                 continue
@@ -102,18 +132,27 @@ def _parse_gather_result(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _fallback_ready(state: Any) -> dict[str, Any]:
-    """LLM 调用失败时，如果已经有对话交互则判定为就绪，否则要求更多信息。"""
+def _parse_file_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip().lstrip("/") for v in value if str(v).strip()][:3]
+    return []
+
+
+def _fallback_result(state: Any) -> dict[str, Any]:
     if state.questions_asked >= 1:
         return {
-            "ready": True,
+            "action": "ready",
             "understanding": state.title,
             "approach": "请评估 Issue 内容后决定修复方案",
             "question": "",
+            "close_reason": "",
+            "look_at_files": [],
         }
     return {
-        "ready": False,
+        "action": "ask",
         "understanding": "",
         "approach": "",
         "question": "感谢提交 Issue！为了更好地理解问题，请问可以提供更详细的描述或复现步骤吗？",
+        "close_reason": "",
+        "look_at_files": [],
     }

@@ -11,7 +11,7 @@ import logging
 import time
 from typing import Any
 
-from .api import get_issue_comments
+from .api import get_file_content, get_issue_comments
 from .gatherer import analyze_and_gather
 
 logger = logging.getLogger(__name__)
@@ -233,17 +233,45 @@ class IssueTracker:
         self._save(state)
 
     async def _try_gather(self, state: IssueState) -> None:
-        result = await analyze_and_gather(state, self._engine_proxy)
         max_q = self._config.get("max_questions", 3)
+        code_context: dict[str, str] = {}
+        fetched_files: set[str] = set()
 
-        # 达到最大追问次数或 LLM 判定就绪 → 强制就绪
-        if result["ready"] or state.questions_asked >= max_q:
-            state.status = "READY"
-            state.gathered_summary = result.get("understanding", state.title)
-            self._save(state)
-            logger.info("Tracker: Issue #%d 信息就绪，准备通知 developer", state.issue_number)
-            await self._notify_developer(state, result)
-        else:
+        # 多轮信息收集：最多 2 轮代码查看 + 1 轮最终决策
+        for round_num in range(1, 4):
+            result = await analyze_and_gather(state, self._engine_proxy, code_context or None)
+
+            # 请求查看文件 → 获取后重新分析
+            look_at = result.get("look_at_files", [])
+            if look_at and round_num < 3:
+                new_files = [f for f in look_at if f not in fetched_files]
+                if new_files:
+                    for file_path in new_files[:3]:
+                        content = await get_file_content(state.repo, file_path, config=self._config)
+                        if content:
+                            code_context[file_path] = content
+                            fetched_files.add(file_path)
+                            logger.info("Tracker: Issue #%d 获取代码文件 %s", state.issue_number, file_path)
+                    continue  # 重新分析（带新代码上下文）
+
+            action = result.get("action", "ask")
+
+            # 关单
+            if action == "close":
+                close_reason = result.get("close_reason", "经分析此 Issue 无需继续跟进")
+                await self._close_issue(state, close_reason)
+                return
+
+            # 就绪
+            if action == "ready" or state.questions_asked >= max_q:
+                state.status = "READY"
+                state.gathered_summary = result.get("understanding", state.title)
+                self._save(state)
+                logger.info("Tracker: Issue #%d 信息就绪，准备通知 developer", state.issue_number)
+                await self._notify_developer(state, result)
+                return
+
+            # 追问
             question = result.get("question", "")
             if question:
                 from .api import post_issue_comment
@@ -254,6 +282,29 @@ class IssueTracker:
                 self._save(state)
                 logger.info("Tracker: Issue #%d 追问 (%d): %s",
                             state.issue_number, state.questions_asked, question[:80])
+            return
+
+    async def _close_issue(self, state: IssueState, reason: str) -> None:
+        from .api import close_issue as api_close_issue
+        from .closer import _generate_close_comment
+
+        close_msg = await _generate_close_comment(
+            {"number": state.issue_number, "title": state.title, "body": state.body},
+            state.repo, self._engine_proxy, reason,
+        )
+        await api_close_issue(state.repo, state.issue_number, close_msg, self._config)
+        state.status = "CLOSED"
+        self._save(state)
+        logger.info("Tracker: Issue #%d 已关闭", state.issue_number)
+
+        admin_id = self._config.get("admin_user_id", "")
+        if admin_id and self._adapter:
+            await self._adapter.send_private_message(
+                admin_id,
+                f"Issue #{state.issue_number}: {state.title} 已自动关闭\n"
+                f"仓库: {state.repo}\n"
+                f"原因: {reason}",
+            )
 
     async def _notify_developer(self, state: IssueState, result: dict[str, Any]) -> None:
         admin_id = self._config.get("admin_user_id", "")

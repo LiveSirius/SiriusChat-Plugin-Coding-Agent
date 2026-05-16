@@ -262,6 +262,24 @@ async def post_issue_comment(
 # ═══════════════════════════════════════════════════════════════════════
 
 
+async def get_file_content(
+    repo: str, path: str, ref: str = "HEAD", config: dict[str, Any] | None = None
+) -> str:
+    """获取仓库文件原始内容（最多 64KB）。"""
+    if config is None:
+        config = {}
+    async with GitHubClient(_token_for_repo(config, repo)) as client:
+        resp = await client.get(
+            f"/repos/{repo}/contents/{path}",
+            params={"ref": ref},
+            headers={"Accept": "application/vnd.github.v3.raw"},
+        )
+        if resp.status_code == 200:
+            return resp.text[:65536]
+        logger.debug("获取文件 %s 失败: %d", path, resp.status_code)
+        return ""
+
+
 async def close_issue(
     repo: str,
     issue_number: int,
