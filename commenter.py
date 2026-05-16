@@ -15,24 +15,10 @@ async def generate_issue_comment(
     engine_proxy: Any,
     config: dict | None = None,
 ) -> str:
-    """使用 LLM 生成 Issue 智能回复评论，回复风格符合当前人格属性。"""
+    """使用 LLM 生成 Issue 智能回复评论。人格属性由 generate_raw(inject_persona=True) 自动注入。"""
     label_display = " ".join(f"`{l}`" for l in labels) if labels else "（待人工分类）"
 
-    persona = (config or {}).get("persona_info", {})
-    persona_section = ""
-    if persona.get("name"):
-        persona_section = f"\n你的角色身份是「{persona['name']}」。"
-        if persona.get("persona_summary"):
-            persona_section += f"\n角色简介：{persona['persona_summary']}"
-        if persona.get("personality_traits"):
-            traits = "、".join(persona["personality_traits"]) if isinstance(persona["personality_traits"], list) else persona["personality_traits"]
-            persona_section += f"\n性格特征：{traits}"
-        if persona.get("communication_style"):
-            persona_section += f"\n沟通风格：{persona['communication_style']}\n"
-            persona_section += "\n请严格按照沟通风格的要求来撰写回复，回复的口吻和表达方式必须与角色一致。评论末尾署名使用角色名称。"
-        persona_section += "\n请严格按照该角色的身份、性格和沟通风格撰写回复，让回复看起来就是该角色本人写的。"
-
-    prompt = f"""你正在以指定角色身份回复一个 GitHub Issue。回复内容将在 Issue 下公开发表，面向 Issue 提交者。{persona_section}
+    prompt = f"""你正在回复一个 GitHub Issue。回复内容将在 Issue 下公开发表，面向 Issue 提交者。请以你的角色身份和沟通风格撰写回复。
 
 Issue #{issue_data.get('number', '?')}: {issue_data.get('title', '')}
 
@@ -53,7 +39,7 @@ Issue 内容:
 
 请直接输出评论正文，不要包含任何前缀说明。"""
     try:
-        result = await engine_proxy.generate_raw(prompt)
+        result = await engine_proxy.generate_raw(prompt, inject_persona=True)
         return result.strip()
     except Exception:
         issue_title = issue_data.get("title", "未知")

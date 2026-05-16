@@ -38,15 +38,13 @@ class CodingAgentPlugin(PluginBase):
         else:
             self._gh_config = GithubAgentConfig()
 
-        # 获取人格属性，注入到所有 LLM 调用中
-        persona_info = self.ctx.engine.get_persona_info()
-
         if self._gh_config.github_pat:
             config_dict = {
                 "github_pat": self._gh_config.github_pat,
                 "github_username": self._gh_config.github_username,
                 "admin_user_id": self._gh_config.admin_user_id,
                 "repo": self._gh_config.repo,
+                "model": self._gh_config.model,
                 "webhook_secret": self._gh_config.webhook_secret,
                 "auto_label": self._gh_config.auto_label,
                 "auto_comment": self._gh_config.auto_comment,
@@ -56,7 +54,6 @@ class CodingAgentPlugin(PluginBase):
                 "webhook_public_url": self._gh_config.webhook_public_url,
                 "console_viewer_enabled": self._gh_config.console_viewer_enabled,
                 "console_viewer_keep_open": self._gh_config.console_viewer_keep_open,
-                "persona_info": persona_info,
             }
 
             try:
@@ -120,8 +117,6 @@ class CodingAgentPlugin(PluginBase):
         if not self._gh_config or not self._gh_config.github_pat:
             return PluginResponse.fail("GitHub Agent 未配置，请先设置 github_pat")
 
-        persona_info = self.ctx.engine.get_persona_info()
-
         config_dict = {
             "github_pat": self._gh_config.github_pat,
             "github_username": self._gh_config.github_username,
@@ -129,11 +124,11 @@ class CodingAgentPlugin(PluginBase):
             "repo": self._gh_config.repo,
             "max_retries": self._gh_config.max_retries,
             "test_command": self._gh_config.test_command,
+            "model": self._gh_config.model,
             "workspace_dir": str(self._gh_config.workspace_dir),
             "webhook_secret": self._gh_config.webhook_secret,
             "console_viewer_enabled": self._gh_config.console_viewer_enabled,
             "console_viewer_keep_open": self._gh_config.console_viewer_keep_open,
-            "persona_info": persona_info,
         }
 
         result = await handle_gh_command(

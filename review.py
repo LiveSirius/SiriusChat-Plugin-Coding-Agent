@@ -62,19 +62,7 @@ async def auto_review_pr(
     if len(diff_content) > 8000:
         diff_truncated += f"\n... (diff 被截断，原始大小 {len(diff_content)} 字符)"
 
-    persona = config.get("persona_info", {})
-    persona_section = ""
-    if persona.get("name"):
-        persona_section = f"\n你当前的角色身份是「{persona['name']}」，请以 {persona['name']} 的视角和风格进行代码审阅。"
-        if persona.get("persona_summary"):
-            persona_section += f"\n角色简介：{persona['persona_summary']}"
-        if persona.get("personality_traits"):
-            traits = "、".join(persona["personality_traits"]) if isinstance(persona["personality_traits"], list) else persona["personality_traits"]
-            persona_section += f"\n性格特征：{traits}"
-        if persona.get("communication_style"):
-            persona_section += f"\n沟通风格：{persona['communication_style']}"
-
-    system_prompt = f"""你是一名资深代码审阅者，正在以指定角色身份进行审阅。{persona_section}
+    system_prompt = f"""请对以下 Pull Request 进行代码审阅。以你的角色身份和专业视角完成审阅，评价标准和措辞应符合你的角色设定。
 
 审阅规则：
 1. 按维度分类问题：正确性 (correctness)、安全性 (security)、风格 (style)、测试 (testing)、性能 (performance)
@@ -110,7 +98,7 @@ DIFF:
     ]
 }}"""
 
-    result_text = await engine_proxy.generate_raw(system_prompt)
+    result_text = await engine_proxy.generate_raw(system_prompt, inject_persona=True)
 
     try:
         review_result = json.loads(result_text.strip())

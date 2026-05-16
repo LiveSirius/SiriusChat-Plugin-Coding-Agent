@@ -30,6 +30,7 @@ class GithubAgentConfig:
     # Agent 循环
     max_retries: int = 3
     test_command: str = "pytest"
+    model: str = ""  # 空 = 使用 generate_raw 的 task_name 路由
 
     # 功能开关
     auto_label: bool = True
@@ -53,6 +54,7 @@ class GithubAgentConfig:
             "workspace_dir": str(self.workspace_dir),
             "max_retries": self.max_retries,
             "test_command": self.test_command,
+            "model": self.model,
             "auto_label": self.auto_label,
             "auto_comment": self.auto_comment,
             "auto_review": self.auto_review,
@@ -74,6 +76,7 @@ class GithubAgentConfig:
             workspace_dir=Path(data.get("workspace_dir", "data/github_workspace")),
             max_retries=data.get("max_retries", 3),
             test_command=data.get("test_command", "pytest"),
+            model=data.get("model", ""),
             auto_label=data.get("auto_label", True),
             auto_comment=data.get("auto_comment", True),
             auto_review=data.get("auto_review", True),

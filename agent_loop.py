@@ -103,24 +103,11 @@ def _tool_schema_text(tool_registry: ToolRegistry) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path, config: dict | None = None) -> str:
-    """构建 Agent 的系统 Prompt。包含角色定义、人格属性和可用工具说明。"""
-    persona = (config or {}).get("persona_info", {})
-    persona_section = ""
-    if persona.get("name"):
-        persona_section = f"\n你当前的角色身份是「{persona['name']}」，请以 {persona['name']} 的身份和风格来完成修复。"
-        if persona.get("persona_summary"):
-            persona_section += f"\n角色简介：{persona['persona_summary']}"
-        if persona.get("personality_traits"):
-            traits = "、".join(persona["personality_traits"]) if isinstance(persona["personality_traits"], list) else persona["personality_traits"]
-            persona_section += f"\n性格特征：{traits}"
-        if persona.get("communication_style"):
-            persona_section += f"\n沟通风格：{persona['communication_style']}"
-        persona_section += "\n\n你的代码修改风格和问题分析方式应体现该角色的特点。PR 描述、commit message 的措辞也要符合角色风格。\n"
-
+def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str:
+    """构建 Agent 的系统 Prompt。人格属性由 generate_raw(inject_persona=True) 自动注入。"""
     tool_schema = _tool_schema_text(tool_registry)
 
-    return f"""你是一名资深软件工程师，正在通过 tool calling 修复一个 GitHub Issue。{persona_section}
+    return f"""你是一名资深软件工程师，正在通过 tool calling 修复一个 GitHub Issue。请以你的角色身份和沟通风格来完成以下工作。
 
 工作区路径：{workspace_dir}
 
@@ -156,17 +143,28 @@ async def call_llm_with_tools(
     tool_registry: ToolRegistry,
     engine_proxy: Any,
     stream: StreamWriter | None = None,
+    config: dict | None = None,
 ) -> list[dict]:
     """调用 LLM（prompt 中已嵌入工具定义），执行工具调用循环直到 LLM 输出 done。
 
     返回增强后的 messages 列表。
     """
-    max_tool_rounds = 15  # 防止无限工具调用
+    max_tool_rounds = 15
+    model = (config or {}).get("model", "") or None
 
     for _round in range(max_tool_rounds):
-        prompt = messages[-1]["content"] if messages else ""
+        system_prompt = messages[0]["content"] if messages else ""
+        existing = messages[1:-1]  # system 之后、最后一条 user 之前的会话历史
+        user_prompt = messages[-1]["content"] if messages else ""
 
-        result_text = await engine_proxy.generate_raw(prompt)
+        result_text = await engine_proxy.generate_raw(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+            messages=existing,
+            inject_persona=True,
+            model=model,
+            task_name="plugin_raw",
+        )
 
         if stream:
             stream.think(result_text)
@@ -240,7 +238,7 @@ async def generate_changelog(diff: str, issue_data: dict, engine_proxy: Any) -> 
         f"Git Diff:\n{diff[:6000]}"
     )
     try:
-        result = await engine_proxy.generate_raw(prompt)
+        result = await engine_proxy.generate_raw(prompt, inject_persona=True)
         return result.strip()
     except Exception:
         return "（自动 Changelog 生成失败）"
@@ -280,7 +278,7 @@ async def run_agent_loop(
             "title": task_data["issue_title"],
             "body": task_data.get("issue_body", ""),
         }
-        system_prompt = build_system_prompt(tool_registry, workspace_dir, config)
+        system_prompt = build_system_prompt(tool_registry, workspace_dir)
         user_message = f"Issue #{issue_data['number']}: {issue_data['title']}\n\n{issue_data.get('body', '')}"
 
         stream.phase("ANALYSIS", "开始代码检索与定位...")
@@ -289,7 +287,7 @@ async def run_agent_loop(
             {"role": "user", "content": user_message},
         ]
 
-        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream)
+        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
 
         # 验证阶段：flake8 → pytest，失败则重试
         max_retries = config.get("max_retries", 3)
@@ -308,7 +306,7 @@ async def run_agent_loop(
                         "role": "user",
                         "content": f"静态检查失败（第{attempt}次）:\n{lint_result['stderr']}\n请修复代码风格/语法问题。",
                     })
-                    messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream)
+                    messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
                     continue
                 stream.error("静态检查未通过，已达重试上限")
                 stream.done(success=False, summary="flake8 检查未通过")
@@ -327,7 +325,7 @@ async def run_agent_loop(
                     "role": "user",
                     "content": f"测试失败（第{attempt}次）:\n{test_result['stderr']}\n请分析错误并修复。",
                 })
-                messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream)
+                messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
             else:
                 stream.error(f"达到最大重试次数 ({max_retries})，修复失败")
                 stream.done(success=False, summary="测试未通过，已达重试上限")
