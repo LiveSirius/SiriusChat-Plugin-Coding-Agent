@@ -63,9 +63,9 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     # 2. Sync upstream
     await sync_fork(repo_name, config)
 
-    # 3. Clone（PAT 来自 per-repo token 或全局 fallback）
-    from .api import _token_for_repo
-    pat = _token_for_repo(config, repo_name)
+    # 3. Clone（PAT 来自插件写 token）
+    from .api import _write_token_for_repo
+    pat = _write_token_for_repo(config)
     fork_url = f"https://{pat}@github.com/{username}/{repo_name.split('/')[-1]}.git"
     if not (task_dir / ".git").exists():
         proc = await asyncio.create_subprocess_exec(

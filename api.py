@@ -17,20 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 def _token_for_repo(config: dict[str, Any], repo: str = "") -> str:
-    """获取 API token。
-
-    优先级：per-repo token（MonitorConfig）> 全局 github_pat（旧兼容）。
-    """
+    """获取读操作 token，从 github_monitor 的 per-repo token 读取。"""
     monitor = config.get("_monitor")
     if monitor is not None and repo:
         token = monitor.get_token(repo)
         if token:
             return token
-    return config.get("github_pat", "")
+    return ""
 
 
-def _token(config: dict[str, Any]) -> str:
-    return config.get("github_pat", "")
+def _write_token_for_repo(config: dict[str, Any]) -> str:
+    """获取写操作 token。
+
+    优先级：插件级 github_write_token > 空（无写 token 不允许写操作）。
+    """
+    return config.get("github_write_token", "")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -87,7 +88,7 @@ async def get_pr_reviews(repo: str, pr_number: int, config: dict[str, Any]) -> l
 
 
 async def fork_repo(repo: str, config: dict[str, Any]) -> dict[str, Any] | None:
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(f"/repos/{repo}/forks")
         if resp.status_code in (200, 201, 202):
             return resp.json()
@@ -100,7 +101,7 @@ async def fork_repo(repo: str, config: dict[str, Any]) -> dict[str, Any] | None:
 
 async def sync_fork(repo: str, config: dict[str, Any]) -> bool:
     username = repo.split("/")[0] if "/" in repo else config.get("github_username", "")
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(
             f"/repos/{username}/{repo.split('/')[-1]}/merge-upstream",
             json={"branch": "main"},
@@ -124,7 +125,7 @@ async def create_pr(
     base: str,
     config: dict[str, Any],
 ) -> dict[str, Any] | None:
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         result = await client.post_json(
             f"/repos/{repo}/pulls",
             json={"title": title, "body": body, "head": head, "base": base},
@@ -141,7 +142,7 @@ async def create_review(
     event: str,
     config: dict[str, Any],
 ) -> dict[str, Any] | None:
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         result = await client.post_json(
             f"/repos/{repo}/pulls/{pr_number}/reviews",
             json={"body": body, "event": event},
@@ -160,7 +161,7 @@ async def create_inline_comment(
     body: str,
     config: dict[str, Any],
 ) -> dict[str, Any] | None:
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(
             f"/repos/{repo}/pulls/{pr_number}/comments",
             json={"body": body, "commit_id": commit_id, "path": path, "line": line, "side": "RIGHT"},
@@ -191,7 +192,7 @@ async def create_label(
     description: str,
     config: dict[str, Any],
 ) -> bool:
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(
             f"/repos/{repo}/labels",
             json={"name": name, "color": color, "description": description},
@@ -205,7 +206,7 @@ async def add_labels_to_issue(
     labels: list[str],
     config: dict[str, Any],
 ) -> bool:
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(
             f"/repos/{repo}/issues/{issue_number}/labels",
             json={"labels": labels},
@@ -219,7 +220,7 @@ async def post_issue_comment(
     body: str,
     config: dict[str, Any],
 ) -> bool:
-    async with GitHubClient(_token_for_repo(config, repo)) as client:
+    async with GitHubClient(_write_token_for_repo(config)) as client:
         resp = await client.post(
             f"/repos/{repo}/issues/{issue_number}/comments",
             json={"body": body},

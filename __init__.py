@@ -31,6 +31,7 @@ class CodingAgentPlugin(PluginBase):
     _plugin_parameters = [
         {"name": "webhook_port", "type": "int", "description": "Webhook 监听端口（0=自动分配）", "default": 0},
         {"name": "webhook_public_url", "type": "string", "description": "Webhook 公网地址（如 ngrok URL）"},
+        {"name": "github_write_token", "type": "string", "description": "GitHub 写操作 PAT（fork/PR/标签/评论），留空则复用 monitor 读 Token"},
         {"name": "model", "type": "string", "description": "自定义 LLM 模型名（空=使用路由）"},
         {"name": "max_retries", "type": "int", "description": "最大重试次数", "default": 3},
         {"name": "test_command", "type": "string", "description": "测试命令", "default": "pytest"},
@@ -143,6 +144,7 @@ class CodingAgentPlugin(PluginBase):
         return {
             "repos": self._monitor.repo_names,
             "_monitor": self._monitor,
+            "github_write_token": self._gh_config.github_write_token,
             "admin_user_id": self._resolve_admin_id(),
             "model": self._gh_config.model,
             "webhook_secret": self._monitor.webhook_secret,
