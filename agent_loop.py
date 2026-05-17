@@ -192,7 +192,7 @@ async def call_llm_with_tools(
     - 调用 done → 检查 git diff → 有变更则退出，无变更则警告继续
     - 仅 max_rounds 耗尽或 done+diff 满足时退出
     """
-    max_tool_rounds = 15
+    max_tool_rounds = 200
     model = (config or {}).get("model", "") or None
     done_without_changes = 0
 
@@ -514,7 +514,9 @@ async def _finalize_and_create_pr(
     issue_title = issue_data.get("title", f"Fix issue #{issue_number}")
     repo.index.commit(f"Auto-fix issue #{issue_number}: {issue_title[:60]}")
 
-    repo.git.push("origin", f"fix-issue-{issue_number}")
+    # 强制推送：每次 clone 都是全新的，远程可能已有同名分支
+    fix_branch = f"fix-issue-{issue_number}"
+    repo.git.push("--force", "origin", fix_branch)
 
     pr_title = f"Fix #{issue_number}: {issue_title[:72]}"
     default_branch = await get_default_branch(repo_name, config)
@@ -526,7 +528,7 @@ async def _finalize_and_create_pr(
         repo_name,
         pr_title,
         pr_body,
-        f"{username}:fix-issue-{issue_number}",
+        f"{username}:{fix_branch}",
         default_branch,
         config,
     )
