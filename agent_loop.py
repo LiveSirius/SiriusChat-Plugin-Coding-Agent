@@ -184,7 +184,9 @@ def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str
 ## 重要注意事项
 
 ### 文件路径
-- 所有文件路径都相对于工作区根目录 {workspace_dir}
+- 所有文件路径都**相对于工作区根目录** {workspace_dir}
+- 可以直接使用文件名（如 `closer.py`），工具会自动在工作区中查找
+- 也支持子目录路径（如 `plugins/file.py`）和绝对路径
 - 路径分隔符使用正斜杠（如 'sirius_chat/webui/static/style.css'）
 
 ### 失败处理策略
@@ -607,11 +609,24 @@ async def run_agent_loop(
 
 
 async def _run_test_cmd(test_command: str, workspace_dir: Path) -> dict:
-    """运行测试命令的封装（使用 shell 执行以支持复杂命令）。"""
+    """运行测试命令的封装（使用 shell 执行以支持复杂命令）。
+
+    自动查找项目根目录（含有 pyproject.toml 的祖先目录），
+    确保 pytest 等命令能从项目根运行并找到正确的测试文件。
+    """
+    # 向上查找含有 pyproject.toml 的项目根目录
+    project_root = workspace_dir
+    for parent in [workspace_dir] + list(workspace_dir.parents):
+        if (parent / "pyproject.toml").exists():
+            project_root = parent
+            break
+        if len(project_root.parents) > 10:
+            break
+
     try:
         proc = await asyncio.create_subprocess_shell(
             test_command,
-            cwd=str(workspace_dir),
+            cwd=str(project_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -622,8 +637,8 @@ async def _run_test_cmd(test_command: str, workspace_dir: Path) -> dict:
             return {"success": False, "stdout": "", "stderr": "测试超时（>120秒）"}
         return {
             "success": proc.returncode == 0,
-            "stdout": stdout.decode(errors="replace")[-3000:],
-            "stderr": stderr.decode(errors="replace")[-2000:],
+            "stdout": (stdout.decode("utf-8", errors="replace") or "")[-3000:] if stdout else "",
+            "stderr": (stderr.decode("utf-8", errors="replace") or "")[-2000:] if stderr else "",
         }
     except FileNotFoundError:
         return {

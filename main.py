@@ -118,12 +118,16 @@ class CodingAgentPlugin(PluginBase):
         register_pr_handler(_on_pr_event)
 
         # Issue 评论处理器：已有 tracker 则回灌评论，无 tracker 则新建
+        # 注意：GitHub issue_comment 事件对 Issue 和 PR 都触发，需过滤 PR 评论
         async def _on_issue_comment(body: dict[str, Any], repo_name: str) -> None:
             if repo_name not in self._effective_repos:
                 return
             issue = body.get("issue", {})
             comment = body.get("comment", {})
             if not issue or not comment:
+                return
+            # 跳过 PR 评论（PR 有独立的 review/comment 流程）
+            if issue.get("pull_request"):
                 return
             issue_number = issue.get("number", 0)
             if not issue_number:

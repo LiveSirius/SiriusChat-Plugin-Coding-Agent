@@ -60,13 +60,35 @@ def set_workspace_root(root: Path) -> None:
     _workspace_root = root.resolve()
 
 
-def _validate_path(file_path: str) -> None:
-    """确保文件路径在 workspace 内，防止路径穿越攻击。"""
-    resolved = Path(file_path).resolve()
+def _validate_path(file_path: str) -> Path:
+    """确保文件路径在 workspace 内，防止路径穿越攻击。
+
+    支持两种路径：
+    - 绝对路径（如 D:\\path\\to\\file.py）
+    - 相对于工作区根的路径（如 closer.py、plugins/file.py）
+
+    Returns:
+        解析后的绝对路径。
+    """
     if _workspace_root is None:
         raise RuntimeError("工作区未初始化")
-    if not str(resolved).startswith(str(_workspace_root)):
-        raise PermissionError(f"禁止访问工作区外的文件: {file_path}")
+
+    # 1. 尝试从进程 CWD 解析
+    resolved = Path(file_path).resolve()
+    if str(resolved).startswith(str(_workspace_root)):
+        return resolved
+
+    # 2. 尝试从工作区根解析（支持相对路径如 "closer.py"）
+    alt_resolved = (_workspace_root / file_path).resolve()
+    # 防止路径穿越攻击：检查是否仍在工作区内
+    if str(alt_resolved).startswith(str(_workspace_root)):
+        return alt_resolved
+
+    raise PermissionError(
+        f"禁止访问工作区外的文件: {file_path}\n"
+        f"  工作区根目录: {_workspace_root}\n"
+        f"  提示：请使用相对于工作区根的路径，如 '{_workspace_root.name}/your_file.py'"
+    )
 
 
 # ── 4 个工具实现 ──
@@ -105,9 +127,9 @@ async def search_content(keyword: str, directory: str = ".") -> str:
 
 async def read_file_chunk(file_path: str, start_line: int, end_line: int) -> str:
     """按行读取文件片段，防止超大文件撑爆 Token。"""
-    _validate_path(file_path)
     try:
-        lines = await asyncio.to_thread(_read_lines, file_path, start_line, end_line)
+        resolved = _validate_path(file_path)
+        lines = await asyncio.to_thread(_read_lines, str(resolved), start_line, end_line)
         return "\n".join(lines)
     except Exception as e:
         return f"读取文件失败: {e}"
@@ -126,13 +148,15 @@ def _read_lines(file_path: str, start_line: int, end_line: int) -> list[str]:
 
 async def search_and_replace_block(file_path: str, old_block: str, new_block: str) -> str:
     """精确字符串替换，校验唯一性。"""
-    _validate_path(file_path)
-    content = Path(file_path).read_text(encoding="utf-8")
+    try:
+        resolved = _validate_path(file_path)
+    except PermissionError as e:
+        return str(e)
+    content = resolved.read_text(encoding="utf-8")
     count = content.count(old_block)
     if count == 0:
         return f"错误：未在 {file_path} 中找到目标代码块"
     if count > 1:
-        # 列出所有匹配位置便于 LLM 调整搜索块
         positions = []
         idx = 0
         while True:
@@ -144,7 +168,7 @@ async def search_and_replace_block(file_path: str, old_block: str, new_block: st
             idx = pos + 1
         return f"错误：目标代码块在 {file_path} 中出现 {count} 次（不唯一）。匹配位置：{', '.join(positions)}。请提供更多上下文使匹配唯一。"
     new_content = content.replace(old_block, new_block, 1)
-    Path(file_path).write_text(new_content, encoding="utf-8")
+    resolved.write_text(new_content, encoding="utf-8")
     return f"成功替换 {file_path} 中的代码块"
 
 
@@ -164,8 +188,8 @@ async def run_local_test(test_command: str) -> dict:
             return {"success": False, "stdout": "", "stderr": "测试超时（>60秒）"}
         return {
             "success": proc.returncode == 0,
-            "stdout": stdout.decode(),
-            "stderr": stderr.decode(),
+            "stdout": stdout.decode("utf-8", errors="replace") if stdout else "",
+            "stderr": stderr.decode("utf-8", errors="replace") if stderr else "",
         }
     except FileNotFoundError:
         return {
@@ -215,13 +239,14 @@ def build_default_registry() -> ToolRegistry:
             "按行号范围读取文件内容片段，防止超大文件撑爆 Token。"
             "当 search_content 已定位到目标行号后，用此工具读取上下文代码。"
             "start_line 和 end_line 都必填（均从 1 开始计数）。"
+            "file_path 可以是相对于工作区根的文件路径，或是简单的文件名（如 'style.css'）。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "相对于工作区根的文件路径，如 'sirius_chat/webui/static/style.css'",
+                    "description": "文件路径（相对于工作区根，如 'closer.py' 或 'sirius_chat/webui/static/style.css'）",
                 },
                 "start_line": {
                     "type": "integer",
@@ -243,13 +268,14 @@ def build_default_registry() -> ToolRegistry:
             "在文件中精确替换代码块。要求 old_block 在目标文件中仅出现一次，"
             "否则会报错并返回所有匹配位置。请提供足够的上下文行使匹配唯一。"
             "修改成功后文件即刻保存。"
+            "file_path 可以是相对于工作区根的文件路径，或是简单的文件名（如 'style.css'）。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "相对于工作区根的文件路径",
+                    "description": "文件路径（相对于工作区根，如 'closer.py' 或 'sirius_chat/webui/static/style.css'）",
                 },
                 "old_block": {
                     "type": "string",
