@@ -26,9 +26,9 @@ async def handle_gh_command(
         /gh review <pr_number> [quick|deep] — 手动触发 PR 审阅（单仓库）
         /gh review <repo_index> <pr_number> [quick|deep] — 手动触发 PR 审阅（多仓库）
     """
-    # 权限校验
+    # 权限校验（channel_user_id 是原始 QQ 号，与 adapter root 配置一致）
     admin_id = _get_admin_id(ctx)
-    if ctx.message.user_id != admin_id:
+    if str(ctx.message.channel_user_id) != admin_id:
         return "权限不足"
 
     parts = command_args.strip().split()
