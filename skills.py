@@ -106,13 +106,11 @@ async def search_content(keyword: str, directory: str = ".") -> str:
 async def read_file_chunk(file_path: str, start_line: int, end_line: int) -> str:
     """按行读取文件片段，防止超大文件撑爆 Token。"""
     _validate_path(file_path)
-    lines: list[str] = []
     try:
-        async with asyncio.to_thread(_read_lines, file_path, start_line, end_line) as result:
-            lines = result
+        lines = await asyncio.to_thread(_read_lines, file_path, start_line, end_line)
+        return "\n".join(lines)
     except Exception as e:
         return f"读取文件失败: {e}"
-    return "\n".join(lines)
 
 
 def _read_lines(file_path: str, start_line: int, end_line: int) -> list[str]:
@@ -151,23 +149,30 @@ async def search_and_replace_block(file_path: str, old_block: str, new_block: st
 
 
 async def run_local_test(test_command: str) -> dict:
-    """在沙盒中运行测试命令。"""
-    proc = await asyncio.create_subprocess_exec(
-        *test_command.split(),
-        cwd=str(_workspace_root) if _workspace_root else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    """在沙盒中运行测试命令（Windows 环境，使用 shell 执行以支持管道、重定向、引号）。"""
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return {"success": False, "stdout": "", "stderr": "测试超时（>60秒）"}
-    return {
-        "success": proc.returncode == 0,
-        "stdout": stdout.decode(),
-        "stderr": stderr.decode(),
-    }
+        proc = await asyncio.create_subprocess_shell(
+            test_command,
+            cwd=str(_workspace_root) if _workspace_root else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"success": False, "stdout": "", "stderr": "测试超时（>60秒）"}
+        return {
+            "success": proc.returncode == 0,
+            "stdout": stdout.decode(),
+            "stderr": stderr.decode(),
+        }
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"命令未找到（Windows 环境，请使用 PowerShell 兼容命令）: {test_command.split()[0] if test_command else ''}",
+        }
 
 
 async def tool_done() -> str:
@@ -181,12 +186,23 @@ def build_default_registry() -> ToolRegistry:
 
     registry.register(ToolDef(
         name="search_content",
-        description="在指定目录中搜索关键词，返回匹配的文件路径与行号",
+        description=(
+            "在指定目录中递归搜索文件内容中的关键词（大小写不敏感），"
+            "跳过 .git/node_modules/__pycache__ 等噪音目录，"
+            "返回匹配的文件路径、行号和行内容摘要（上限 50 条）。"
+            "用于快速定位相关代码的位置。"
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "搜索关键词"},
-                "directory": {"type": "string", "description": "搜索目录，默认当前目录"},
+                "keyword": {
+                    "type": "string",
+                    "description": "搜索关键词（大小写不敏感），如 'slider'、'renderPluginSettingsForm'",
+                },
+                "directory": {
+                    "type": "string",
+                    "description": "搜索目录的相对于工作区根的路径，如 '.' 或 'sirius_chat/webui/static'",
+                },
             },
             "required": ["keyword"],
         },
@@ -195,13 +211,26 @@ def build_default_registry() -> ToolRegistry:
 
     registry.register(ToolDef(
         name="read_file_chunk",
-        description="按行读取文件指定片段，防止超大文件撑爆 Token",
+        description=(
+            "按行号范围读取文件内容片段，防止超大文件撑爆 Token。"
+            "当 search_content 已定位到目标行号后，用此工具读取上下文代码。"
+            "start_line 和 end_line 都必填（均从 1 开始计数）。"
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径"},
-                "start_line": {"type": "integer", "description": "起始行号（从1开始）"},
-                "end_line": {"type": "integer", "description": "结束行号"},
+                "file_path": {
+                    "type": "string",
+                    "description": "相对于工作区根的文件路径，如 'sirius_chat/webui/static/style.css'",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "起始行号（从 1 开始，含该行）",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "结束行号（从 1 开始，含该行）",
+                },
             },
             "required": ["file_path", "start_line", "end_line"],
         },
@@ -210,13 +239,26 @@ def build_default_registry() -> ToolRegistry:
 
     registry.register(ToolDef(
         name="search_and_replace_block",
-        description="在文件中精确替换代码块，要求被替换的代码块在文件中唯一",
+        description=(
+            "在文件中精确替换代码块。要求 old_block 在目标文件中仅出现一次，"
+            "否则会报错并返回所有匹配位置。请提供足够的上下文行使匹配唯一。"
+            "修改成功后文件即刻保存。"
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径"},
-                "old_block": {"type": "string", "description": "要被替换的旧代码块"},
-                "new_block": {"type": "string", "description": "替换后的新代码块"},
+                "file_path": {
+                    "type": "string",
+                    "description": "相对于工作区根的文件路径",
+                },
+                "old_block": {
+                    "type": "string",
+                    "description": "要被替换的原始代码块（必须与文件中内容完全一致，包括空白字符）",
+                },
+                "new_block": {
+                    "type": "string",
+                    "description": "替换后的新代码块",
+                },
             },
             "required": ["file_path", "old_block", "new_block"],
         },
@@ -225,11 +267,22 @@ def build_default_registry() -> ToolRegistry:
 
     registry.register(ToolDef(
         name="run_local_test",
-        description="在工作区中运行测试命令（如 pytest/flake8）并返回结果",
+        description=(
+            "在工作区沙盒中运行一条 shell 命令（Windows PowerShell 环境）。"
+            "支持管道、重定向、引号。用于运行 pytest、flake8 等测试， "
+            "或执行一次性 Python 脚本查看文件内容。"
+            "注意：不要使用 Unix 命令（如 head/cat/wc/grep），"
+            "应使用 PowerShell 命令或 'python -c ...'。"
+            "若需执行复杂 Python 逻辑，建议先用 search_and_replace_block "
+            "创建/覆盖临时 .py 脚本文件再运行。"
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "test_command": {"type": "string", "description": "测试命令，如 pytest 或 flake8 ."},
+                "test_command": {
+                    "type": "string",
+                    "description": "要执行的命令，如 'pytest'、'python temp.py'、'powershell -Command \"Get-Content file.css -Head 20\"'",
+                },
             },
             "required": ["test_command"],
         },
@@ -238,7 +291,7 @@ def build_default_registry() -> ToolRegistry:
 
     registry.register(ToolDef(
         name="done",
-        description="确认所有修改已完成，触发代码提交和 PR 创建流程",
+        description="确认所有修改已完成，触发代码验证、提交和 PR 创建流程",
         parameters={
             "type": "object",
             "properties": {},

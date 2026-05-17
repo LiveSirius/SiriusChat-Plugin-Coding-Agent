@@ -149,7 +149,11 @@ def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str
 
     return f"""你是一名资深软件工程师，正在通过 tool calling 修复一个 GitHub Issue。请以你的角色身份和沟通风格来完成以下工作。
 
-工作区路径：{workspace_dir}
+## 运行环境
+
+- **操作系统**：Windows，命令行使用 **PowerShell** 语法
+- **工作区路径**：{workspace_dir}
+- **重要**：不要使用 Unix 命令（head/cat/wc/grep/sed/awk），它们在本环境不可用
 
 ## 可用工具
 
@@ -170,11 +174,32 @@ def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str
 {{"tool": "done", "args": {{}}}}
 ```
 
-## 工作流程
-1. 先用 search_content 定位相关代码
-2. 用 read_file_chunk 查看上下文
-3. 用 search_and_replace_block 进行修改
-4. 修改完毕后调用 done 工具"""
+## 推荐工作流程
+
+1. **定位代码**：用 search_content 搜索关键词，获取文件路径与行号
+2. **查看上下文**：用 read_file_chunk 读取 search_content 返回的行号附近的代码
+3. **精确修改**：用 search_and_replace_block 替换代码块（确保 old_block 在文件中唯一）
+4. **完成**：修改完毕后调用 done 工具
+
+## 重要注意事项
+
+### 文件路径
+- 所有文件路径都相对于工作区根目录 {workspace_dir}
+- 路径分隔符使用正斜杠（如 'sirius_chat/webui/static/style.css'）
+
+### 失败处理策略
+- 如果某个工具调用返回错误（特别是 read_file_chunk），**不要重试相同参数**，尝试以下替代方案：
+  - 扩大/缩小 search_content 的 directory 参数范围
+  - 用 search_content 搜索文件中的其他唯一标记来定位代码
+  - 用 run_local_test 执行 `powershell -Command "Get-Content <file> -Head N"` 查看文件前 N 行
+- 如果一种方法连续失败 2 次，立刻切换策略，不要反复尝试
+- search_content 跳过大文件（>256KB），若目标文件很大请用 read_file_chunk
+
+### run_local_test 使用建议
+- 测试命令：直接使用 'pytest' 或 'flake8'
+- 查看文件内容：`powershell -Command "Get-Content <file> -Head 50"`
+- 执行 Python 脚本：先用 search_and_replace_block 创建脚本文件，再用 'python temp_script.py' 运行
+- 避免嵌套引号过深的 python -c 命令"""
 
 
 async def _streaming_generate(
@@ -571,23 +596,30 @@ async def run_agent_loop(
 
 
 async def _run_test_cmd(test_command: str, workspace_dir: Path) -> dict:
-    """运行测试命令的封装。"""
-    proc = await asyncio.create_subprocess_exec(
-        *test_command.split(),
-        cwd=str(workspace_dir),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    """运行测试命令的封装（使用 shell 执行以支持复杂命令）。"""
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return {"success": False, "stdout": "", "stderr": "测试超时（>60秒）"}
-    return {
-        "success": proc.returncode == 0,
-        "stdout": stdout.decode(),
-        "stderr": stderr.decode(),
-    }
+        proc = await asyncio.create_subprocess_shell(
+            test_command,
+            cwd=str(workspace_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"success": False, "stdout": "", "stderr": "测试超时（>60秒）"}
+        return {
+            "success": proc.returncode == 0,
+            "stdout": stdout.decode(),
+            "stderr": stderr.decode(),
+        }
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"命令未找到: {test_command.split()[0] if test_command else ''}",
+        }
 
 
 async def _finalize_and_create_pr(
