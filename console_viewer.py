@@ -40,15 +40,11 @@ def _print_phase(name: str, detail: str) -> None:
 
 def _print_think(text: str) -> None:
     for line in text.split("\n"):
-        if len(line) > 120:
-            line = line[:117] + "..."
         print(f"{C_WHITE}  {line}{C_RESET}")
 
 
 def _print_reasoning(text: str) -> None:
     for line in text.split("\n"):
-        if len(line) > 120:
-            line = line[:117] + "..."
         print(f"{C_DIM}  [思考] {line}{C_RESET}")
 
 
@@ -61,8 +57,8 @@ def _print_tool_result(name: str, result: str, success: bool) -> None:
     icon = "OK" if success else "FAIL"
     color = C_GREEN if success else C_RED
     print(f"  {color}{icon} {name} 返回:{C_RESET}")
-    for line in result.split("\n")[:10]:
-        print(f"     {C_DIM}{line[:120]}{C_RESET}")
+    for line in result.split("\n")[:20]:
+        print(f"     {C_DIM}{line}{C_RESET}")
 
 
 def _print_test_run(command: str, success: bool, stdout: str, stderr: str) -> None:
@@ -70,9 +66,14 @@ def _print_test_run(command: str, success: bool, stdout: str, stderr: str) -> No
         print(f"  {C_GREEN}OK {command} -- 全部通过{C_RESET}")
     else:
         print(f"  {C_RED}FAIL {command} -- 测试失败{C_RESET}")
-        for line in stderr.split("\n")[:5]:
+        for line in stderr.split("\n")[:10]:
             if line.strip():
-                print(f"     {C_RED}{line[:120]}{C_RESET}")
+                print(f"     {C_RED}{line}{C_RESET}")
+        if stdout.strip():
+            print(f"     {C_DIM}stdout (末 5 行):{C_RESET}")
+            for line in stdout.split("\n")[-5:]:
+                if line.strip():
+                    print(f"     {C_DIM}{line}{C_RESET}")
 
 
 def _print_retry(attempt: int, max_retries: int, reason: str) -> None:

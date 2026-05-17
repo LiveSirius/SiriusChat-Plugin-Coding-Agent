@@ -36,17 +36,16 @@ class StreamWriter:
         self._emit("tool_call", {"name": name, "arguments": arguments})
 
     def tool_result(self, name: str, result: str, success: bool = True) -> None:
-        """输出工具调用结果。结果过长时截断。"""
-        truncated = result[:500] + ("..." if len(result) > 500 else "")
-        self._emit("tool_result", {"name": name, "result": truncated, "success": success})
+        """输出工具调用结果。"""
+        self._emit("tool_result", {"name": name, "result": result[:3000], "success": success})
 
     def test_run(self, command: str, success: bool, stdout: str, stderr: str) -> None:
         """输出测试执行结果。"""
         self._emit("test_run", {
             "command": command,
             "success": success,
-            "stdout": stdout[:300],
-            "stderr": stderr[:300],
+            "stdout": stdout[:3000],
+            "stderr": stderr[:2000],
         })
 
     def retry(self, attempt: int, max_retries: int, reason: str) -> None:
