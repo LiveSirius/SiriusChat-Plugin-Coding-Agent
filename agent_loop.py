@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +48,18 @@ def _launch_console_viewer(stream_file: Path, keep_open: bool = False) -> subpro
         return None
 
 
+def _rmtree_force(path: Path) -> None:
+    """强制删除目录（处理 Windows 只读文件/隐藏 .git）"""
+    def _on_error(func, p, exc_info):
+        os.chmod(p, stat.S_IWRITE)
+        try:
+            func(p)
+        except Exception:
+            pass
+
+    shutil.rmtree(str(path), onerror=_on_error, ignore_errors=True)
+
+
 async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> Path:
     """准备本地工作区：Fork → Sync → Clone（每次全新）→ 创建分支。"""
     workspace_root = Path(config["workspace_dir"])
@@ -61,14 +75,25 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     # 2. Sync upstream
     await sync_fork(repo_name, config)
 
-    # 3. Clone（每次先删除旧目录，确保全新 clone）
-    import shutil
+    # 3. Clone（每次先强制删除旧目录，确保全新 clone）
     pat = _write_token_for_repo(config, repo_name)
     fork_url = f"https://{pat}@github.com/{username}/{repo_name.split('/')[-1]}.git"
 
     for clone_attempt in range(1, 4):
         if task_dir.exists():
-            shutil.rmtree(task_dir, ignore_errors=True)
+            _rmtree_force(task_dir)
+        # 二次确认：目录必须已消失
+        if task_dir.exists():
+            logger.warning("rmtree 未能完全删除 %s，尝试 cmd 强制清理", task_dir)
+            try:
+                proc_clean = await asyncio.create_subprocess_exec(
+                    "cmd", "/c", "rmdir", "/s", "/q", str(task_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc_clean.communicate()
+            except Exception:
+                pass
         task_dir.mkdir(parents=True, exist_ok=True)
 
         proc = await asyncio.create_subprocess_exec(
