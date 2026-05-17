@@ -51,6 +51,8 @@ class CodingAgentPlugin(PluginBase):
         {"name": "review_mode", "type": "string", "description": "PR 审阅深度: quick|deep", "default": "quick"},
         {"name": "console_viewer_enabled", "type": "boolean", "description": "弹出实时控制台窗口", "default": True},
         {"name": "console_viewer_keep_open", "type": "boolean", "description": "修复完成后保持窗口打开", "default": False},
+        {"name": "log_archive_enabled", "type": "boolean", "description": "启用工作流日志归档", "default": True},
+        {"name": "log_archive_max_count", "type": "int", "description": "归档日志最大保留数", "default": 50},
     ]
 
     def __init__(self) -> None:

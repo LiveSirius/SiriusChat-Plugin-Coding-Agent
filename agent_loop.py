@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,58 @@ from .skills import (
 from .stream_writer import StreamWriter
 
 logger = logging.getLogger(__name__)
+
+
+# ── 日志归档 ──
+
+
+def _archive_agent_log(stream_file: Path, config: dict) -> None:
+    """将 agent 工作流日志归档到 logs/archive/ 目录。
+    
+    每次工作流完成后调用，将 .stream 文件复制到归档目录并清理旧归档。
+    """
+    if not config.get("log_archive_enabled", True):
+        logger.debug("日志归档已禁用，跳过")
+        return
+    
+    if not stream_file.exists():
+        logger.warning("归档失败: stream 文件不存在 %s", stream_file)
+        return
+    
+    archive_dir = stream_file.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    archive_name = f"{stream_file.stem}_{timestamp}{stream_file.suffix}"
+    archive_path = archive_dir / archive_name
+    
+    try:
+        shutil.copy2(str(stream_file), str(archive_path))
+        logger.info("工作流日志已归档: %s → %s", stream_file.name, archive_path.name)
+        
+        # 清理旧归档，保留最近 N 个
+        max_count = int(config.get("log_archive_max_count", 50))
+        _clean_old_archives(archive_dir, max_count)
+    except Exception as exc:
+        logger.error("工作流日志归档失败: %s", exc, exc_info=True)
+
+
+def _clean_old_archives(archive_dir: Path, max_count: int) -> None:
+    """清理归档目录，保留最近 max_count 个日志文件。"""
+    if not archive_dir.exists():
+        return
+    
+    try:
+        archives = sorted(
+            [f for f in archive_dir.iterdir() if f.suffix == ".stream"],
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        for old_file in archives[max_count:]:
+            old_file.unlink(missing_ok=True)
+            logger.debug("已清理旧归档: %s", old_file.name)
+    except Exception as exc:
+        logger.warning("清理旧归档失败: %s", exc)
 
 _VIEWER_SCRIPT = "console_viewer.py"
 _CHANGELOG_RETRIES = 3
@@ -599,6 +652,8 @@ async def run_agent_loop(
     finally:
         if "stream" in locals():
             stream.close()
+            # 工作流日志归档
+            _archive_agent_log(stream_file, config)
         if viewer_process:
             try:
                 viewer_process.wait(timeout=2)
