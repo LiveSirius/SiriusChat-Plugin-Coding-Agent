@@ -152,19 +152,22 @@ async def call_llm_with_tools(
     messages: list[dict],
     tool_registry: ToolRegistry,
     engine_proxy: Any,
+    workspace_dir: Path,
     stream: StreamWriter | None = None,
     config: dict | None = None,
 ) -> list[dict]:
-    """调用 LLM（prompt 中已嵌入工具定义），执行工具调用循环直到 LLM 输出 done。
+    """调用 LLM（prompt 中已嵌入工具定义），执行工具调用循环直到 LLM 输出 done 且产生代码变更。
 
+    当 LLM 宣布 done 但 git diff 为空时，自动注入警告并让 LLM 继续工作（最多 2 次）。
     返回增强后的 messages 列表。
     """
     max_tool_rounds = 15
     model = (config or {}).get("model", "") or None
+    no_change_count = 0
 
     for _round in range(max_tool_rounds):
         system_prompt = messages[0]["content"] if messages else ""
-        existing = messages[1:-1]  # system 之后、最后一条 user 之前的会话历史
+        existing = messages[1:-1]
         user_prompt = messages[-1]["content"] if messages else ""
 
         result_text = await engine_proxy.generate_raw(
@@ -179,19 +182,43 @@ async def call_llm_with_tools(
         if stream:
             stream.think(result_text)
 
-        # 尝试解析 JSON 工具调用
         tool_call = _parse_tool_call(result_text)
         if tool_call is None:
-            # 没有工具调用 → 视为 LLM 在思考/分析，进入验证阶段
             messages.append({"role": "assistant", "content": result_text})
             break
 
         if tool_call.get("status") == "done":
-            # LLM 宣布工作完成
             messages.append({"role": "assistant", "content": result_text})
-            break
+            # LLM 宣布完成 → 立刻检查是否有实际代码变更
+            diff_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--stat",
+                cwd=str(workspace_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            diff_stdout, _ = await diff_proc.communicate()
+            if diff_stdout.decode().strip():
+                break  # 有变更，真正完成
 
-        # 执行工具
+            # 无变更 → 警告 LLM 继续工作
+            no_change_count += 1
+            if no_change_count > 2:
+                logger.warning("LLM 连续 %d 次宣布完成但无代码变更，强制终止", no_change_count)
+                break
+
+            if stream:
+                stream.think("（LLM 宣布完成但未检测到代码变更，要求继续修复）")
+            messages.append({
+                "role": "user",
+                "content": (
+                    "⚠️ 警告：你声明了 done 但没有任何文件被修改。Issue 尚未被修复。"
+                    "请定位相关代码，使用 search_and_replace_block 进行实质性修改，"
+                    "确认修改完成后再输出 {\"status\": \"done\"}。"
+                    "不要在没有修改代码的情况下宣布完成。"
+                ),
+            })
+            continue
+
         tool_name = tool_call.get("tool", "")
         tool_args = tool_call.get("args", {})
         if stream:
@@ -201,7 +228,6 @@ async def call_llm_with_tools(
         if stream:
             stream.tool_result(tool_name, result_str)
 
-        # 将工具调用和结果加入消息历史
         messages.append({
             "role": "assistant",
             "content": f"调用工具 {tool_name}，参数：{json.dumps(tool_args, ensure_ascii=False)}",
@@ -313,31 +339,7 @@ async def run_agent_loop(
             {"role": "user", "content": user_message},
         ]
 
-        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
-
-        # ── 变更检测：LLM 经常输出 done 但实际未改任何代码 ──
-        no_change_retries = 2
-        for _ in range(no_change_retries + 1):
-            diff_proc = await asyncio.create_subprocess_exec(
-                "git", "diff", "--stat",
-                cwd=str(workspace_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            diff_stdout, _ = await diff_proc.communicate()
-            diff_stat = diff_stdout.decode().strip()
-            if diff_stat:
-                break  # 有变更，进入验证阶段
-            stream.think("（未检测到任何代码变更，要求 LLM 继续工作）")
-            messages.append({
-                "role": "user",
-                "content": (
-                    "⚠️ 警告：你没有对任何文件做出修改。Issue 未被修复。"
-                    "请定位相关代码并使用 search_and_replace_block 进行修改，"
-                    "确认修改完成后输出 {\"status\": \"done\"}。不要在没有修改代码的情况下宣布完成。"
-                ),
-            })
-            messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
+        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
 
         # ── 验证阶段：测试，失败则重试 ──
         max_retries = config.get("max_retries", 3)
@@ -358,7 +360,7 @@ async def run_agent_loop(
                             "role": "user",
                             "content": f"静态检查失败（第{attempt}次）:\n{lint_result['stderr']}\n请修复代码风格/语法问题。",
                         })
-                        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
+                        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
                         continue
                     stream.error("静态检查未通过，已达重试上限")
                     stream.done(success=False, summary=f"{lint_cmd} 检查未通过")
@@ -377,7 +379,7 @@ async def run_agent_loop(
                     "role": "user",
                     "content": f"测试失败（第{attempt}次）:\n{test_result['stderr']}\n请分析错误并修复。",
                 })
-                messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
+                messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
             else:
                 stream.error(f"达到最大重试次数 ({max_retries})，修复失败")
                 stream.done(success=False, summary="测试未通过，已达重试上限")
