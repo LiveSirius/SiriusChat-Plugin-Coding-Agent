@@ -42,6 +42,10 @@ class GithubAgentConfig:
     console_viewer_enabled: bool = True
     console_viewer_keep_open: bool = False
 
+    # ── 日志归档 ──
+    log_archive_enabled: bool = True
+    log_archive_max_count: int = 50
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "active_repos": self.active_repos,
@@ -61,6 +65,8 @@ class GithubAgentConfig:
             "review_mode": self.review_mode,
             "console_viewer_enabled": self.console_viewer_enabled,
             "console_viewer_keep_open": self.console_viewer_keep_open,
+            "log_archive_enabled": self.log_archive_enabled,
+            "log_archive_max_count": self.log_archive_max_count,
         }
 
     @classmethod
@@ -83,6 +89,8 @@ class GithubAgentConfig:
             review_mode=data.get("review_mode", "quick"),
             console_viewer_enabled=_parse_bool(data.get("console_viewer_enabled", True)),
             console_viewer_keep_open=_parse_bool(data.get("console_viewer_keep_open", False)),
+            log_archive_enabled=_parse_bool(data.get("log_archive_enabled", True)),
+            log_archive_max_count=int(data.get("log_archive_max_count", 50)),
         )
 
 

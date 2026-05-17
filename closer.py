@@ -39,7 +39,7 @@ async def try_close_garbage_issue(
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             result_text = await engine_proxy.generate_raw(
-                _build_issue_garbage_prompt(issue_data), inject_persona=False, json_mode=True,
+                _build_issue_garbage_prompt(issue_data), inject_persona=False, model=config.get("model", ""), json_mode=True,
             )
             result_text = result_text.strip()
             break
@@ -84,7 +84,7 @@ async def try_close_garbage_pr(
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             result_text = await engine_proxy.generate_raw(
-                _build_pr_garbage_prompt(pr_data), inject_persona=False, json_mode=True,
+                _build_pr_garbage_prompt(pr_data), inject_persona=False, model=config.get("model", ""), json_mode=True,
             )
             result_text = result_text.strip()
             break
