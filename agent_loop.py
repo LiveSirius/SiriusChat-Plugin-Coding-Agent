@@ -132,12 +132,13 @@ def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path, test_c
 
 ## 工具调用规则
 
-当你需要执行操作时，请输出严格的 JSON 格式工具调用，每行一个：
+当你需要执行操作时，请输出严格的 JSON 格式工具调用，每行一个。可以一次输出多个工具调用（并行执行）：
 ```json
-{{"tool": "工具名", "args": {{"参数1": "值1", ...}}}}
+{{"tool": "工具名1", "args": {{"参数1": "值1", ...}}}}
+{{"tool": "工具名2", "args": {{"参数1": "值1", ...}}}}
 ```
 
-然后我会执行工具并返回结果给你。你可以连续输出多个工具调用。
+然后我会执行工具并返回结果给你。
 
 当你完成所有修改、确认不再需要调用工具时，输出：
 ```json
@@ -186,14 +187,49 @@ async def call_llm_with_tools(
         if stream:
             stream.think(result_text)
 
-        tool_call = _parse_tool_call(result_text)
-        if tool_call is None:
+        tool_calls = _parse_tool_calls(result_text)
+        if not tool_calls:
             messages.append({"role": "assistant", "content": result_text})
             break
 
-        if tool_call.get("status") == "done":
+        # 分离 done 信号和工具调用（done 必须单出，不能和工具混在一起）
+        has_done = any(t.get("status") == "done" for t in tool_calls)
+        active_tools = [t for t in tool_calls if t.get("status") != "done"]
+
+        # 执行所有工具调用
+        tool_results: list[tuple[str, str, dict]] = []
+        for t in active_tools:
+            tool_name = t.get("tool", "")
+            tool_args = t.get("args", {})
+            if stream:
+                stream.tool_call(tool_name, tool_args)
+            result_str = await tool_registry.call(tool_name, **tool_args)
+            if stream:
+                stream.tool_result(tool_name, result_str)
+            tool_results.append((tool_name, result_str, tool_args))
+
+        # 注入执行结果到对话
+        if tool_results:
+            for tool_name, result_str, tool_args in tool_results:
+                messages.append({
+                    "role": "assistant",
+                    "content": f"调用工具 {tool_name}，参数：{json.dumps(tool_args, ensure_ascii=False)}",
+                })
+            results_feedback = "\n\n".join(
+                f"[{name}] 返回：\n{res}" for name, res, _ in tool_results
+            )
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"工具执行结果：\n\n{results_feedback}\n\n"
+                    "请根据以上结果继续分析或进行下一步操作。"
+                    "仅当你确认 Issue 已被修复（已用 search_and_replace_block 修改了代码）后再输出 {\"status\": \"done\"}。"
+                ),
+            })
+
+        # done 信号处理（在工具执行后）
+        if has_done:
             messages.append({"role": "assistant", "content": result_text})
-            # LLM 宣布完成 → 立刻检查是否有实际代码变更
             diff_proc = await asyncio.create_subprocess_exec(
                 "git", "diff", "--stat",
                 cwd=str(workspace_dir),
@@ -202,9 +238,8 @@ async def call_llm_with_tools(
             )
             diff_stdout, _ = await diff_proc.communicate()
             if diff_stdout.decode().strip():
-                break  # 有变更，真正完成
+                break
 
-            # 无变更 → 警告 LLM 继续工作
             no_change_count += 1
             if no_change_count > 2:
                 logger.warning("LLM 连续 %d 次宣布完成但无代码变更，强制终止", no_change_count)
@@ -215,31 +250,15 @@ async def call_llm_with_tools(
             messages.append({
                 "role": "user",
                 "content": (
-                    "⚠️ 警告：你声明了 done 但没有任何文件被修改。Issue 尚未被修复。"
-                    "请定位相关代码，使用 search_and_replace_block 进行实质性修改，"
-                    "确认修改完成后再输出 {\"status\": \"done\"}。"
-                    "不要在没有修改代码的情况下宣布完成。"
+                    "⚠️ 警告：你声明了 done 但没有任何文件被修改。\n"
+                    "请重新审视 Issue 需求，搜索相关代码，定位到具体需要修改的位置后"
+                    "使用 search_and_replace_block 进行修改。"
+                    "确认代码已成功修改后再输出 {\"status\": \"done\"}。\n"
+                    "提示：如果搜索不到关键词，试试换用英文术语（如 slider→range、主题→theme/css）、"
+                    "搜索文件名（webui、plugin、settings 等）。"
                 ),
             })
             continue
-
-        tool_name = tool_call.get("tool", "")
-        tool_args = tool_call.get("args", {})
-        if stream:
-            stream.tool_call(tool_name, tool_args)
-
-        result_str = await tool_registry.call(tool_name, **tool_args)
-        if stream:
-            stream.tool_result(tool_name, result_str)
-
-        messages.append({
-            "role": "assistant",
-            "content": f"调用工具 {tool_name}，参数：{json.dumps(tool_args, ensure_ascii=False)}",
-        })
-        messages.append({
-            "role": "user",
-            "content": f"工具 {tool_name} 返回：\n{result_str}\n\n请根据结果继续分析或进行下一步操作。如果工作完成，输出 {{\"status\": \"done\"}}。",
-        })
 
     else:
         logger.warning("工具调用轮数达到上限 %d，强制终止", max_tool_rounds)
@@ -247,19 +266,20 @@ async def call_llm_with_tools(
     return messages
 
 
-def _parse_tool_call(text: str) -> dict | None:
-    """从 LLM 输出中解析第一条 JSON 工具调用。"""
+def _parse_tool_calls(text: str) -> list[dict]:
+    """从 LLM 输出中解析所有 JSON 工具调用（支持单次回复多个工具调用）。"""
+    results: list[dict] = []
     lines = text.strip().split("\n")
     for line in lines:
         line = line.strip()
-        if line.startswith("{"):
+        if line.startswith("{") and line.endswith("}"):
             try:
                 obj = json.loads(line)
                 if "tool" in obj or "status" in obj:
-                    return obj
+                    results.append(obj)
             except json.JSONDecodeError:
                 continue
-    return None
+    return results
 
 
 async def generate_changelog(diff: str, issue_data: dict, engine_proxy: Any) -> str:
