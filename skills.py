@@ -170,6 +170,11 @@ async def run_local_test(test_command: str) -> dict:
     }
 
 
+async def tool_done() -> str:
+    """声明工作完成，触发验证流程。"""
+    return "DONE"
+
+
 def build_default_registry() -> ToolRegistry:
     """创建并注册 4 个默认工具的 ToolRegistry。"""
     registry = ToolRegistry()
@@ -229,6 +234,16 @@ def build_default_registry() -> ToolRegistry:
             "required": ["test_command"],
         },
         handler=run_local_test,
+    ))
+
+    registry.register(ToolDef(
+        name="done",
+        description="确认所有修改已完成，触发代码提交和 PR 创建流程",
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        handler=tool_done,
     ))
 
     return registry

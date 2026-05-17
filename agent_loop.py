@@ -118,7 +118,7 @@ def _tool_schema_text(tool_registry: ToolRegistry) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path, test_command: str = "pytest") -> str:
+def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str:
     """构建 Agent 的系统 Prompt。人格属性由 generate_raw(inject_persona=True) 自动注入。"""
     tool_schema = _tool_schema_text(tool_registry)
 
@@ -140,17 +140,16 @@ def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path, test_c
 
 然后我会执行工具并返回结果给你。
 
-当你完成所有修改、确认不再需要调用工具时，输出：
+当你完成所有修改、确认 Issue 已被修复后，调用 done 工具：
 ```json
-{{"status": "done"}}
+{{"tool": "done", "args": {{}}}}
 ```
 
 ## 工作流程
 1. 先用 search_content 定位相关代码
 2. 用 read_file_chunk 查看上下文
 3. 用 search_and_replace_block 进行修改
-4. 修改完毕后运行 run_local_test("{test_command}") 做验证
-5. 如果测试失败，分析错误并继续修改"""
+4. 修改完毕后调用 done 工具"""
 
 
 async def call_llm_with_tools(
@@ -215,13 +214,10 @@ async def call_llm_with_tools(
             })
             continue
 
-        # 分离 done 信号和工具调用（done 必须单出，不能和工具混在一起）
-        has_done = any(t.get("status") == "done" for t in tool_calls)
-        active_tools = [t for t in tool_calls if t.get("status") != "done"]
-
-        # 执行所有工具调用
+        # 执行本轮所有工具调用（done 也和其他工具一样处理）
+        messages.append({"role": "assistant", "content": result_text})
         tool_results: list[tuple[str, str, dict]] = []
-        for t in active_tools:
+        for t in tool_calls:
             tool_name = t.get("tool", "")
             tool_args = t.get("args", {})
             if stream:
@@ -231,13 +227,11 @@ async def call_llm_with_tools(
                 stream.tool_result(tool_name, result_str)
             tool_results.append((tool_name, result_str, tool_args))
 
-        # 注入执行结果到对话
-        if tool_results:
-            for tool_name, result_str, tool_args in tool_results:
-                messages.append({
-                    "role": "assistant",
-                    "content": f"调用工具 {tool_name}，参数：{json.dumps(tool_args, ensure_ascii=False)}",
-                })
+        # 检查是否有 done 调用
+        done_called = any(name == "done" for name, _, _ in tool_results)
+
+        if not done_called:
+            # 普通工具调用 → 注入结果，让 LLM 继续
             results_feedback = "\n\n".join(
                 f"[{name}] 返回：\n{res}" for name, res, _ in tool_results
             )
@@ -246,42 +240,41 @@ async def call_llm_with_tools(
                 "content": (
                     f"工具执行结果：\n\n{results_feedback}\n\n"
                     "请根据以上结果继续分析或进行下一步操作。"
-                    "仅当你确认 Issue 已被修复（已用 search_and_replace_block 修改了代码）后再输出 {\"status\": \"done\"}。"
-                ),
-            })
-
-        # done 信号处理（在工具执行后）
-        if has_done:
-            messages.append({"role": "assistant", "content": result_text})
-            diff_proc = await asyncio.create_subprocess_exec(
-                "git", "diff", "--stat",
-                cwd=str(workspace_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            diff_stdout, _ = await diff_proc.communicate()
-            if diff_stdout.decode().strip():
-                break
-
-            no_change_count += 1
-            if no_change_count > 2:
-                logger.warning("LLM 连续 %d 次宣布完成但无代码变更，强制终止", no_change_count)
-                break
-
-            if stream:
-                stream.think("（LLM 宣布完成但未检测到代码变更，要求继续修复）")
-            messages.append({
-                "role": "user",
-                "content": (
-                    "⚠️ 警告：你声明了 done 但没有任何文件被修改。\n"
-                    "请重新审视 Issue 需求，搜索相关代码，定位到具体需要修改的位置后"
-                    "使用 search_and_replace_block 进行修改。"
-                    "确认代码已成功修改后再输出 {\"status\": \"done\"}。\n"
-                    "提示：如果搜索不到关键词，试试换用英文术语（如 slider→range、主题→theme/css）、"
-                    "搜索文件名（webui、plugin、settings 等）。"
+                    "修改完成后请调用 done 工具。"
                 ),
             })
             continue
+
+        # LLM 调用了 done → 检查 git diff
+        diff_proc = await asyncio.create_subprocess_exec(
+            "git", "diff", "--stat",
+            cwd=str(workspace_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        diff_stdout, _ = await diff_proc.communicate()
+        if diff_stdout.decode().strip():
+            break  # 有代码变更，进入验证
+
+        # 无变更 → 警告并继续
+        no_change_count += 1
+        if no_change_count > 2:
+            logger.warning("LLM 连续 %d 次调用 done 但无代码变更，强制终止", no_change_count)
+            break
+
+        if stream:
+            stream.think("（LLM 调用 done 但未检测到代码变更，要求继续修复）")
+        messages.append({
+            "role": "user",
+            "content": (
+                "⚠️ 警告：你调用了 done 但没有任何文件被修改。\n"
+                "请重新审视 Issue 需求，搜索相关代码，定位到具体需要修改的位置后"
+                "使用 search_and_replace_block 进行修改。"
+                "修改完成后再调用 done 工具。\n"
+                "提示：如果搜索不到关键词，试试换用英文术语（如 slider→range、主题→theme/css）、"
+                "搜索文件名（webui、plugin、settings 等）。"
+            ),
+        })
 
     else:
         logger.warning("工具调用轮数达到上限 %d，强制终止", max_tool_rounds)
@@ -298,7 +291,7 @@ def _parse_tool_calls(text: str) -> list[dict]:
         if line.startswith("{") and line.endswith("}"):
             try:
                 obj = json.loads(line)
-                if "tool" in obj or "status" in obj:
+                if "tool" in obj:
                     results.append(obj)
             except json.JSONDecodeError:
                 continue
@@ -377,7 +370,7 @@ async def run_agent_loop(
             "body": task_data.get("issue_body", ""),
         }
         test_command = config.get("test_command", "pytest")
-        system_prompt = build_system_prompt(tool_registry, workspace_dir, test_command)
+        system_prompt = build_system_prompt(tool_registry, workspace_dir)
         user_message = f"Issue #{issue_data['number']}: {issue_data['title']}\n\n{issue_data.get('body', '')}"
 
         stream.phase("ANALYSIS", "开始代码检索与定位...")
