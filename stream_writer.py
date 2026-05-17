@@ -27,6 +27,10 @@ class StreamWriter:
         """输出 LLM 推理片段。"""
         self._emit("think", {"text": text})
 
+    def reasoning(self, text: str) -> None:
+        """输出 LLM 推理过程（thinking/reasoning tokens）。"""
+        self._emit("reasoning", {"text": text})
+
     def tool_call(self, name: str, arguments: dict[str, Any]) -> None:
         """输出工具调用开始。"""
         self._emit("tool_call", {"name": name, "arguments": arguments})

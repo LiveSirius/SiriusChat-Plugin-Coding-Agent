@@ -42,7 +42,14 @@ def _print_think(text: str) -> None:
     for line in text.split("\n"):
         if len(line) > 120:
             line = line[:117] + "..."
-        print(f"{C_DIM}  {line}{C_RESET}")
+        print(f"{C_WHITE}  {line}{C_RESET}")
+
+
+def _print_reasoning(text: str) -> None:
+    for line in text.split("\n"):
+        if len(line) > 120:
+            line = line[:117] + "..."
+        print(f"{C_DIM}  [思考] {line}{C_RESET}")
 
 
 def _print_tool_call(name: str, arguments: dict) -> None:
@@ -93,6 +100,7 @@ def _print_done(success: bool, summary: str, pr_url: str) -> None:
 _EVENT_HANDLERS = {
     "phase": lambda d: _print_phase(d["name"], d.get("detail", "")),
     "think": lambda d: _print_think(d["text"]),
+    "reasoning": lambda d: _print_reasoning(d["text"]),
     "tool_call": lambda d: _print_tool_call(d["name"], d["arguments"]),
     "tool_result": lambda d: _print_tool_result(d["name"], d["result"], d.get("success", True)),
     "test_run": lambda d: _print_test_run(d["command"], d["success"], d.get("stdout", ""), d.get("stderr", "")),

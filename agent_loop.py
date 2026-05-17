@@ -177,6 +177,116 @@ def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str
 4. 修改完毕后调用 done 工具"""
 
 
+async def _streaming_generate(
+    engine_proxy: Any,
+    prompt: str,
+    system_prompt: str,
+    messages: list[dict] | None,
+    model: str | None,
+    stream: StreamWriter | None,
+) -> str:
+    """流式调用 LLM，实时推送 think/reasoning 到 viewer，返回完整文本。"""
+    engine = getattr(engine_proxy, "_engine", None)
+    provider = getattr(engine, "provider_async", None) if engine else None
+    if provider is None or not hasattr(provider, "generate_stream"):
+        # 降级：非流式
+        result = await engine_proxy.generate_raw(
+            prompt=prompt, system_prompt=system_prompt, messages=messages,
+            inject_persona=True, model=model, task_name="plugin_raw",
+            return_reasoning=True,
+        )
+        reasoning_text = ""
+        if isinstance(result, tuple):
+            reasoning_text, content_text = result
+        else:
+            content_text = result
+        if stream:
+            if reasoning_text:
+                stream.reasoning(reasoning_text)
+            stream.think(content_text)
+        return content_text or reasoning_text
+
+    # 人格注入
+    persona = getattr(engine, "persona", None)
+    if persona:
+        persona_lines = []
+        name = getattr(persona, "name", "")
+        if name:
+            persona_lines.append(f"你当前的角色身份是「{name}」。")
+        summary = getattr(persona, "persona_summary", "")
+        if summary:
+            persona_lines.append(f"角色简介：{summary}")
+        traits = getattr(persona, "personality_traits", [])
+        if traits:
+            persona_lines.append(f"性格特征：{'、'.join(traits[:3])}")
+        style = getattr(persona, "communication_style", "")
+        if style:
+            persona_lines.append(f"沟通风格：{style}")
+        if persona_lines:
+            system_prompt = "\n".join(persona_lines) + ("\n\n" + system_prompt if system_prompt else "")
+
+    resolved_model = model
+    if resolved_model is None:
+        model_router = getattr(engine, "model_router", None)
+        if model_router:
+            resolved_model = model_router.resolve("plugin_raw").model_name
+
+    msgs: list[dict[str, object]] = []
+    if system_prompt:
+        msgs.append({"role": "system", "content": system_prompt})
+    if messages:
+        msgs.extend(messages)
+    msgs.append({"role": "user", "content": prompt})
+
+    from sirius_chat.providers.base import GenerationRequest
+    request = GenerationRequest(
+        model=resolved_model or "",
+        system_prompt="",
+        messages=msgs,
+        temperature=0.7,
+        max_tokens=4096,
+        timeout_seconds=120.0,
+        purpose="plugin_raw",
+    )
+
+    full_text = ""
+    full_reasoning = ""
+    try:
+        async for chunk_type, text in provider.generate_stream(request):
+            if chunk_type == "reasoning":
+                full_reasoning += text
+            else:
+                full_text += text
+            if stream:
+                if chunk_type == "reasoning":
+                    stream.reasoning(full_reasoning)
+                else:
+                    stream.think(full_text)
+    except Exception:
+        logger.exception("流式生成失败，降级到非流式")
+        result = await engine_proxy.generate_raw(
+            prompt=prompt, system_prompt=system_prompt, messages=messages,
+            inject_persona=False, model=model, task_name="plugin_raw",
+            return_reasoning=True,
+        )
+        reasoning_text = ""
+        if isinstance(result, tuple):
+            reasoning_text, content_text = result
+        else:
+            content_text = result
+        if stream:
+            if reasoning_text:
+                stream.reasoning(reasoning_text)
+            stream.think(content_text)
+        return content_text or reasoning_text
+
+    if stream:
+        if full_reasoning:
+            stream.reasoning(full_reasoning)
+        stream.think(full_text)
+    return full_text
+
+
 async def call_llm_with_tools(
     messages: list[dict],
     tool_registry: ToolRegistry,
@@ -201,17 +311,14 @@ async def call_llm_with_tools(
         existing = messages[1:-1]
         user_prompt = messages[-1]["content"] if messages else ""
 
-        result_text = await engine_proxy.generate_raw(
+        result_text = await _streaming_generate(
+            engine_proxy,
             prompt=user_prompt,
             system_prompt=system_prompt,
             messages=existing,
-            inject_persona=True,
             model=model,
-            task_name="plugin_raw",
+            stream=stream,
         )
-
-        if stream:
-            stream.think(result_text)
 
         tool_calls = _parse_tool_calls(result_text)
         messages.append({"role": "assistant", "content": result_text})
