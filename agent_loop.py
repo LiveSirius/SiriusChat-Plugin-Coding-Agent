@@ -315,7 +315,31 @@ async def run_agent_loop(
 
         messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
 
-        # 验证阶段：flake8 → pytest，失败则重试
+        # ── 变更检测：LLM 经常输出 done 但实际未改任何代码 ──
+        no_change_retries = 2
+        for _ in range(no_change_retries + 1):
+            diff_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--stat",
+                cwd=str(workspace_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            diff_stdout, _ = await diff_proc.communicate()
+            diff_stat = diff_stdout.decode().strip()
+            if diff_stat:
+                break  # 有变更，进入验证阶段
+            stream.think("（未检测到任何代码变更，要求 LLM 继续工作）")
+            messages.append({
+                "role": "user",
+                "content": (
+                    "⚠️ 警告：你没有对任何文件做出修改。Issue 未被修复。"
+                    "请定位相关代码并使用 search_and_replace_block 进行修改，"
+                    "确认修改完成后输出 {\"status\": \"done\"}。不要在没有修改代码的情况下宣布完成。"
+                ),
+            })
+            messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
+
+        # ── 验证阶段：测试，失败则重试 ──
         max_retries = config.get("max_retries", 3)
         tests_passed = False
 
@@ -429,6 +453,11 @@ async def _finalize_and_create_pr(
 
     repo = Repo(workspace_dir)
     repo.git.add(".")
+
+    # 安全校验：无变更则不提交
+    diff_result = repo.git.diff("--cached", "--stat")
+    if not diff_result.strip():
+        raise RuntimeError("git diff 为空：Agent 未产生任何代码变更，拒绝创建空 PR")
 
     # 设置仓库级 git 用户身份，确保 GitHub 将提交归因于正确账户
     username = _resolve_github_username(repo_name, config)
