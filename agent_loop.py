@@ -160,14 +160,16 @@ async def call_llm_with_tools(
     stream: StreamWriter | None = None,
     config: dict | None = None,
 ) -> list[dict]:
-    """调用 LLM（prompt 中已嵌入工具定义），执行工具调用循环直到 LLM 输出 done 且产生代码变更。
+    """调用 LLM，执行工具调用循环直到 LLM 调用 done 且产生代码变更。
 
-    当 LLM 宣布 done 但 git diff 为空时，自动注入警告并让 LLM 继续工作（最多 2 次）。
-    返回增强后的 messages 列表。
+    - 无工具调用 → 警告并继续（不退）
+    - 有工具调用 → 执行 → 返回结果
+    - 调用 done → 检查 git diff → 有变更则退出，无变更则警告继续
+    - 仅 max_rounds 耗尽或 done+diff 满足时退出
     """
     max_tool_rounds = 15
     model = (config or {}).get("model", "") or None
-    no_change_count = 0
+    done_without_changes = 0
 
     for _round in range(max_tool_rounds):
         system_prompt = messages[0]["content"] if messages else ""
@@ -187,35 +189,20 @@ async def call_llm_with_tools(
             stream.think(result_text)
 
         tool_calls = _parse_tool_calls(result_text)
-        if not tool_calls:
-            messages.append({"role": "assistant", "content": result_text})
-            # LLM 没有输出工具调用 → 先检查是否真的改过了代码
-            diff_proc = await asyncio.create_subprocess_exec(
-                "git", "diff", "--stat",
-                cwd=str(workspace_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            diff_stdout, _ = await diff_proc.communicate()
-            if diff_stdout.decode().strip():
-                break  # 已有代码变更，LLM 确实完成了
+        messages.append({"role": "assistant", "content": result_text})
 
-            # 无变更且无工具调用 → LLM 走神了，推它继续
-            if stream:
-                stream.think("（LLM 未输出工具调用且无代码变更，要求继续工作）")
+        if not tool_calls:
             messages.append({
                 "role": "user",
                 "content": (
-                    "⚠️ 你没有调用任何工具，也没有修改代码。Issue 尚未被修复。\n"
-                    "请使用 search_content 搜索相关代码，用 read_file_chunk 阅读代码上下文，"
-                    "然后用 search_and_replace_block 进行修改。"
-                    "不要仅输出解释性文字，必须执行实际的工具操作。"
+                    "你没有调用任何工具。请使用 search_content 搜索相关代码、"
+                    "read_file_chunk 查看上下文、search_and_replace_block 进行修改。"
+                    "修改完成后调用 done 工具。不要只输出文字说明。"
                 ),
             })
             continue
 
-        # 执行本轮所有工具调用（done 也和其他工具一样处理）
-        messages.append({"role": "assistant", "content": result_text})
+        # 执行本轮所有工具
         tool_results: list[tuple[str, str, dict]] = []
         for t in tool_calls:
             tool_name = t.get("tool", "")
@@ -227,11 +214,9 @@ async def call_llm_with_tools(
                 stream.tool_result(tool_name, result_str)
             tool_results.append((tool_name, result_str, tool_args))
 
-        # 检查是否有 done 调用
         done_called = any(name == "done" for name, _, _ in tool_results)
 
         if not done_called:
-            # 普通工具调用 → 注入结果，让 LLM 继续
             results_feedback = "\n\n".join(
                 f"[{name}] 返回：\n{res}" for name, res, _ in tool_results
             )
@@ -239,13 +224,12 @@ async def call_llm_with_tools(
                 "role": "user",
                 "content": (
                     f"工具执行结果：\n\n{results_feedback}\n\n"
-                    "请根据以上结果继续分析或进行下一步操作。"
-                    "修改完成后请调用 done 工具。"
+                    "继续分析或修改代码。修改完成后调用 done 工具。"
                 ),
             })
             continue
 
-        # LLM 调用了 done → 检查 git diff
+        # done 被调用 → 检查代码变更
         diff_proc = await asyncio.create_subprocess_exec(
             "git", "diff", "--stat",
             cwd=str(workspace_dir),
@@ -254,25 +238,19 @@ async def call_llm_with_tools(
         )
         diff_stdout, _ = await diff_proc.communicate()
         if diff_stdout.decode().strip():
-            break  # 有代码变更，进入验证
-
-        # 无变更 → 警告并继续
-        no_change_count += 1
-        if no_change_count > 2:
-            logger.warning("LLM 连续 %d 次调用 done 但无代码变更，强制终止", no_change_count)
             break
 
-        if stream:
-            stream.think("（LLM 调用 done 但未检测到代码变更，要求继续修复）")
+        done_without_changes += 1
+        if done_without_changes >= 5:
+            logger.warning("LLM 连续 %d 次 done 无变更，强制退出", done_without_changes)
+            break
+
         messages.append({
             "role": "user",
             "content": (
-                "⚠️ 警告：你调用了 done 但没有任何文件被修改。\n"
-                "请重新审视 Issue 需求，搜索相关代码，定位到具体需要修改的位置后"
-                "使用 search_and_replace_block 进行修改。"
-                "修改完成后再调用 done 工具。\n"
-                "提示：如果搜索不到关键词，试试换用英文术语（如 slider→range、主题→theme/css）、"
-                "搜索文件名（webui、plugin、settings 等）。"
+                "你调用了 done 但仓库没有任何代码变更。"
+                "请定位到需要修改的代码并用 search_and_replace_block 修改，"
+                "完成后再次调用 done 工具。"
             ),
         })
 
