@@ -66,6 +66,16 @@ async def get_issue(repo: str, issue_number: int, config: dict[str, Any]) -> dic
         return result
 
 
+async def is_issue_closed(repo: str, issue_number: int, config: dict[str, Any]) -> bool:
+    """检查 GitHub 侧 Issue 是否已关闭（轻量，只取 state 字段）。"""
+    async with GitHubClient(_token_for_repo(config, repo)) as client:
+        result = await client.get_json(f"/repos/{repo}/issues/{issue_number}")
+        if isinstance(result, dict):
+            return result.get("state", "open") == "closed"
+        logger.debug("检查 Issue #%d 状态失败，假定未关闭", issue_number)
+        return False
+
+
 async def get_issue_comments(
     repo: str, issue_number: int, config: dict[str, Any], *, since: str | None = None
 ) -> list[dict[str, Any]]:

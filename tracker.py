@@ -364,13 +364,18 @@ class IssueTracker:
                 await self._post_summary_and_notify(state, result)
                 return
 
-            # 追问 — 人格化后再发布
+            # 追问 — 人格化后再发布（先检查 Issue 是否已被外部关闭）
             question = result.get("question", "")
             if question:
                 logger.debug("Tracker: Issue #%d 准备追问 (q%d): %s",
                              state.issue_number, state.questions_asked + 1, question[:80])
+                from .api import is_issue_closed, post_issue_comment
+                if await is_issue_closed(state.repo, state.issue_number, self._config):
+                    logger.info("Tracker: Issue #%d 已被外部关闭，跳过追问", state.issue_number)
+                    state.status = "CLOSED"
+                    self._save(state)
+                    return
                 persona_question = await self._persona_question(state, question)
-                from .api import post_issue_comment
                 await post_issue_comment(state.repo, state.issue_number, persona_question, self._config)
                 state.add_conversation("assistant", persona_question)
                 state.questions_asked += 1
@@ -383,8 +388,15 @@ class IssueTracker:
             return
 
     async def _close_issue(self, state: IssueState, reason: str) -> None:
-        from .api import close_issue as api_close_issue
+        from .api import close_issue as api_close_issue, is_issue_closed
         from .closer import _generate_close_comment
+
+        # 检查是否已被外部关闭
+        if await is_issue_closed(state.repo, state.issue_number, self._config):
+            logger.info("Tracker: Issue #%d 已被外部关闭，跳过重复关闭", state.issue_number)
+            state.status = "CLOSED"
+            self._save(state)
+            return
 
         logger.debug("Tracker: Issue #%d 生成关闭评论...", state.issue_number)
         close_msg = await _generate_close_comment(
@@ -435,7 +447,14 @@ Issue #{state.issue_number}: {state.title}
 
     async def _post_summary_and_notify(self, state: IssueState, result: dict[str, Any]) -> None:
         """信息就绪后：在 Issue 下发一条总结评论，然后通知管理员确认修复。"""
-        from .api import post_issue_comment
+        from .api import is_issue_closed, post_issue_comment
+
+        # 检查 Issue 是否已被外部关闭
+        if await is_issue_closed(state.repo, state.issue_number, self._config):
+            logger.info("Tracker: Issue #%d 已被外部关闭，跳过总结", state.issue_number)
+            state.status = "CLOSED"
+            self._save(state)
+            return
 
         understanding = result.get("understanding", state.title)
         approach = result.get("approach", "待分析")
