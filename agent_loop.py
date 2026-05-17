@@ -190,7 +190,30 @@ async def call_llm_with_tools(
         tool_calls = _parse_tool_calls(result_text)
         if not tool_calls:
             messages.append({"role": "assistant", "content": result_text})
-            break
+            # LLM 没有输出工具调用 → 先检查是否真的改过了代码
+            diff_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--stat",
+                cwd=str(workspace_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            diff_stdout, _ = await diff_proc.communicate()
+            if diff_stdout.decode().strip():
+                break  # 已有代码变更，LLM 确实完成了
+
+            # 无变更且无工具调用 → LLM 走神了，推它继续
+            if stream:
+                stream.think("（LLM 未输出工具调用且无代码变更，要求继续工作）")
+            messages.append({
+                "role": "user",
+                "content": (
+                    "⚠️ 你没有调用任何工具，也没有修改代码。Issue 尚未被修复。\n"
+                    "请使用 search_content 搜索相关代码，用 read_file_chunk 阅读代码上下文，"
+                    "然后用 search_and_replace_block 进行修改。"
+                    "不要仅输出解释性文字，必须执行实际的工具操作。"
+                ),
+            })
+            continue
 
         # 分离 done 信号和工具调用（done 必须单出，不能和工具混在一起）
         has_done = any(t.get("status") == "done" for t in tool_calls)
