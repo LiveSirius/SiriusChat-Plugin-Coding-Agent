@@ -47,15 +47,12 @@ def _launch_console_viewer(stream_file: Path, keep_open: bool = False) -> subpro
 
 
 async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> Path:
-    """准备本地工作区：Fork → Sync → Clone → 创建分支。"""
+    """准备本地工作区：Fork → Sync → Clone（每次全新）→ 创建分支。"""
     workspace_root = Path(config["workspace_dir"])
     task_dir = workspace_root / f"task_{issue_number}"
-    task_dir.mkdir(parents=True, exist_ok=True)
-
-    from .api import _resolve_github_username
+    from .api import _resolve_github_username, _write_token_for_repo
     from git import Repo
 
-    # github_username 从配置显式指定，空则 fallback 到仓库 owner
     username = _resolve_github_username(repo_name, config)
 
     # 1. Fork（幂等）
@@ -64,40 +61,24 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     # 2. Sync upstream
     await sync_fork(repo_name, config)
 
-    # 3. Clone（PAT 来自插件写 token）
-    from .api import _write_token_for_repo
+    # 3. Clone（每次先删除旧目录，确保全新 clone）
+    import shutil
+    if task_dir.exists():
+        shutil.rmtree(task_dir, ignore_errors=True)
+    task_dir.mkdir(parents=True, exist_ok=True)
+
     pat = _write_token_for_repo(config, repo_name)
     fork_url = f"https://{pat}@github.com/{username}/{repo_name.split('/')[-1]}.git"
-    if not (task_dir / ".git").exists():
-        proc = await asyncio.create_subprocess_exec(
-            "git", "clone", fork_url, str(task_dir),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            err = stderr.decode()[:500] if stderr else "未知错误"
-            raise RuntimeError(f"git clone 失败 (exit={proc.returncode}): {err}")
-        logger.info("git clone 成功: %s → %s", repo_name, task_dir)
-    else:
-        # 验证 .git 目录是否完整（上次 clone 可能中途失败留下残骸）
-        try:
-            Repo(task_dir)
-        except Exception:
-            logger.warning("repo 目录存在但 .git 损坏，删除后重新 clone: %s", task_dir)
-            import shutil
-            shutil.rmtree(task_dir, ignore_errors=True)
-            task_dir.mkdir(parents=True, exist_ok=True)
-            proc = await asyncio.create_subprocess_exec(
-                "git", "clone", fork_url, str(task_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                err = stderr.decode()[:500] if stderr else "未知错误"
-                raise RuntimeError(f"git clone 重试失败 (exit={proc.returncode}): {err}")
-            logger.info("git clone 成功（重试）: %s → %s", repo_name, task_dir)
+    proc = await asyncio.create_subprocess_exec(
+        "git", "clone", fork_url, str(task_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        err = stderr.decode()[:500] if stderr else "未知错误"
+        raise RuntimeError(f"git clone 失败 (exit={proc.returncode}): {err}")
+    logger.info("git clone 成功: %s → %s", repo_name, task_dir)
 
     # 4. 创建修复分支
     repo = Repo(task_dir)
