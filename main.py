@@ -11,6 +11,7 @@ from sirius_chat.github.event_bridge import (
     register_comment_handler,
     register_issue_handler,
     register_pr_handler,
+    set_coding_bot_login,
     set_issue_repos,
 )
 from sirius_chat.plugins import PluginBase, PluginResponse
@@ -82,6 +83,9 @@ class CodingAgentPlugin(PluginBase):
             return
 
         set_issue_repos(set(self._effective_repos))
+        if self._gh_config.github_username:
+            set_coding_bot_login(self._gh_config.github_username)
+            logger.info("coding bot login 已设置: %s", self._gh_config.github_username)
 
         config_dict = self._build_config_dict()
 
