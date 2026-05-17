@@ -89,7 +89,7 @@ async def _poll_once(
             try:
                 pulls = await list_repo_pulls(repo, config, state="open", per_page=10)
                 for pr_data in pulls:
-                    pr_number = pr_data["number"]
+                    pr_number = pr_data.get("number", 0)
                     updated_at = pr_data.get("updated_at", "")
                     pr_key = f"{pr_number}:{updated_at}"
                     if pr_key in seen_prs[repo]:

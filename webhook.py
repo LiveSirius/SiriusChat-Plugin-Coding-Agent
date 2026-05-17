@@ -95,7 +95,8 @@ async def handle_pr_event(
     """处理 PR 事件：垃圾检测 → 自动代码审阅。"""
     pr_data = body["pull_request"]
     repo_name = body["repository"]["full_name"]
-    pr_number = pr_data["number"]
+    pr_number = pr_data.get("number", 0)
+    pr_title = pr_data.get("title", "") or f"PR #{pr_number}"
     action = body.get("action", "")
 
     # 0. 垃圾检测
@@ -107,7 +108,7 @@ async def handle_pr_event(
                 if admin_id:
                     await adapter.send_private_message(
                         admin_id,
-                        f"PR #{pr_number}: {pr_data['title']} 已自动关闭（判定为垃圾）\n"
+                        f"PR #{pr_number}: {pr_title} 已自动关闭（判定为垃圾）\n"
                         f"仓库: {repo_name}",
                     )
                 return
@@ -134,7 +135,7 @@ async def handle_pr_event(
             await adapter.send_private_message(
                 admin_id,
                 f"[{emoji}] PR #{pr_number} 自动审阅完成\n"
-                f"标题: {pr_data['title']}\n"
+                f"标题: {pr_title}\n"
                 f"结论: {result.get('verdict', 'N/A')}（{result.get('issues_count', 0)} 个问题）\n"
                 f"摘要: {result.get('summary', '')}\n"
                 f"链接: {pr_url}",

@@ -41,9 +41,9 @@ async def auto_review_pr(
     Returns:
         {"review_id": int, "comments": int, "summary": str, "verdict": str}
     """
-    pr_number = pr_data["number"]
-    pr_title = pr_data["title"]
-    pr_body = pr_data.get("body", "")
+    pr_number = pr_data.get("number", 0)
+    pr_title = pr_data.get("title", "") or f"PR #{pr_number}"
+    pr_body = pr_data.get("body", "") or ""
 
     async with GitHubClient(_token(config, repo_full_name)) as client:
         diff_resp = await client.get(f"/repos/{repo_full_name}/pulls/{pr_number}", headers={"Accept": "application/vnd.github.v3.diff"})

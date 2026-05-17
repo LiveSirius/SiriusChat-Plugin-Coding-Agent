@@ -104,8 +104,8 @@ async def try_close_garbage_pr(
         return False
 
     close_msg = await _generate_close_comment(pr_data, repo_name, engine_proxy, parsed["reason"])
-    await close_pr(repo_name, pr_data["number"], close_msg, config)
-    logger.info("PR #%d 已自动关闭", pr_data["number"])
+    await close_pr(repo_name, pr_data.get("number", 0), close_msg, config)
+    logger.info("PR #%d 已自动关闭", pr_data.get("number", 0))
     return True
 
 
@@ -210,10 +210,51 @@ PR 内容:
 
 def _parse_garbage_result(text: str) -> dict[str, Any]:
     import json as _json
+    import re
 
+    text = text.strip()
+
+    # try full-text parse first (covers multi-line JSON)
+    try:
+        data = _json.loads(text)
+        if isinstance(data, dict) and "is_garbage" in data:
+            return {
+                "is_garbage": bool(data.get("is_garbage", False)),
+                "reason": str(data.get("reason", "")).strip()[:200],
+            }
+    except (_json.JSONDecodeError, ValueError):
+        pass
+
+    # try extracting JSON block between { and }
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m:
+        try:
+            data = _json.loads(m.group())
+            if isinstance(data, dict) and "is_garbage" in data:
+                return {
+                    "is_garbage": bool(data.get("is_garbage", False)),
+                    "reason": str(data.get("reason", "")).strip()[:200],
+                }
+        except (_json.JSONDecodeError, ValueError):
+            pass
+
+    # strip markdown fences then retry
+    clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
+    if clean != text:
+        try:
+            data = _json.loads(clean)
+            if isinstance(data, dict) and "is_garbage" in data:
+                return {
+                    "is_garbage": bool(data.get("is_garbage", False)),
+                    "reason": str(data.get("reason", "")).strip()[:200],
+                }
+        except (_json.JSONDecodeError, ValueError):
+            pass
+
+    # fallback: line-by-line
     for line in text.splitlines():
         line = line.strip()
-        if line.startswith("{"):
+        if line.startswith("{") and "is_garbage" in line:
             try:
                 data = _json.loads(line)
                 if isinstance(data, dict) and "is_garbage" in data:
