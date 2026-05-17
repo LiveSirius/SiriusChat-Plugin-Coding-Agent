@@ -231,7 +231,7 @@ class IssueTracker:
         elif state.status == "AWAITING_RESPONSE":
             since_last = time.time() - state.last_activity
             if since_last > 120:
-                logger.debug("Tracker: Issue #%d 等待回复超时 %.0fs，重新分析", state.issue_number, since_last)
+                logger.warning("Tracker: Issue #%d 等待回复超时 %.0fs，重新分析", state.issue_number, since_last)
                 await self._try_gather(state)
             else:
                 logger.debug("Tracker: Issue #%d 等待回复中 (%.0fs/120s)",
@@ -359,18 +359,23 @@ class IssueTracker:
                 state.status = "READY"
                 state.gathered_summary = result.get("understanding", state.title)
                 self._save(state)
-                logger.info("Tracker: Issue #%d 信息就绪 (action=%s), 通知 developer",
+                logger.info("Tracker: Issue #%d 信息就绪 (action=%s), 发送总结并通知 developer",
                              state.issue_number, action)
-                await self._notify_developer(state, result)
+                await self._post_summary_and_notify(state, result)
                 return
 
-            # 追问 — 人格化后再发布
+            # 追问 — 人格化后再发布（先检查 Issue 是否已被外部关闭）
             question = result.get("question", "")
             if question:
                 logger.debug("Tracker: Issue #%d 准备追问 (q%d): %s",
                              state.issue_number, state.questions_asked + 1, question[:80])
+                from .api import is_issue_closed, post_issue_comment
+                if await is_issue_closed(state.repo, state.issue_number, self._config):
+                    logger.info("Tracker: Issue #%d 已被外部关闭，跳过追问", state.issue_number)
+                    state.status = "CLOSED"
+                    self._save(state)
+                    return
                 persona_question = await self._persona_question(state, question)
-                from .api import post_issue_comment
                 await post_issue_comment(state.repo, state.issue_number, persona_question, self._config)
                 state.add_conversation("assistant", persona_question)
                 state.questions_asked += 1
@@ -383,8 +388,15 @@ class IssueTracker:
             return
 
     async def _close_issue(self, state: IssueState, reason: str) -> None:
-        from .api import close_issue as api_close_issue
+        from .api import close_issue as api_close_issue, is_issue_closed
         from .closer import _generate_close_comment
+
+        # 检查是否已被外部关闭
+        if await is_issue_closed(state.repo, state.issue_number, self._config):
+            logger.info("Tracker: Issue #%d 已被外部关闭，跳过重复关闭", state.issue_number)
+            state.status = "CLOSED"
+            self._save(state)
+            return
 
         logger.debug("Tracker: Issue #%d 生成关闭评论...", state.issue_number)
         close_msg = await _generate_close_comment(
@@ -432,6 +444,81 @@ Issue #{state.issue_number}: {state.title}
             return result.strip() or base_question
         except Exception:
             return base_question
+
+    async def _post_summary_and_notify(self, state: IssueState, result: dict[str, Any]) -> None:
+        """信息就绪后：在 Issue 下发一条总结评论，然后通知管理员确认修复。"""
+        from .api import is_issue_closed, post_issue_comment
+
+        # 检查 Issue 是否已被外部关闭
+        if await is_issue_closed(state.repo, state.issue_number, self._config):
+            logger.info("Tracker: Issue #%d 已被外部关闭，跳过总结", state.issue_number)
+            state.status = "CLOSED"
+            self._save(state)
+            return
+
+        understanding = result.get("understanding", state.title)
+        approach = result.get("approach", "待分析")
+
+        # 1. 在 Issue 下发总结评论（人格化）
+        try:
+            summary_prompt = f"""你刚完成了对一个 Issue 的信息收集，现在需要在 Issue 下发一条总结评论。
+
+Issue #{state.issue_number}: {state.title}
+你对问题的理解: {understanding}
+提议的修复方案: {approach}
+总共追问了 {state.questions_asked} 轮
+
+请用你的角色口吻写一条信息收集完成的总结，包含：
+1. 对问题核心的简要重述
+2. 对提供信息者的感谢
+3. 告知等待管理员审核后将启动修复
+控制在 80-120 字。只输出正文。"""
+            summary_text = await self._engine_proxy.generate_raw(
+                summary_prompt, inject_persona=True,
+                model=self._config.get("model", ""),
+            )
+        except Exception:
+            summary_text = f"信息收集已完成。等待管理员审核后启动修复。"
+
+        await post_issue_comment(state.repo, state.issue_number, summary_text.strip(), self._config)
+        state.add_conversation("assistant", summary_text.strip())
+        self._save(state)
+        logger.info("Tracker: Issue #%d 总结已发布到 Issue", state.issue_number)
+
+        # 2. 通知管理员确认
+        admin_id = self._config.get("admin_user_id", "")
+        if not admin_id:
+            from .webhook import _resolve_admin_id
+            admin_id = _resolve_admin_id(self._adapter)
+        if not admin_id or not self._adapter:
+            logger.warning("Tracker: Issue #%d 就绪但无法通知 developer", state.issue_number)
+            return
+
+        try:
+            prompt = f"""以你的角色身份向项目管理员发送通知。
+
+Issue #{state.issue_number}: {state.title}
+仓库: {state.repo}
+理解: {understanding}
+修复方案: {approach}
+任务ID: {state.task_id}
+已追问: {state.questions_asked} 轮
+
+用你的角色口吻告诉管理员:
+1. 信息收集已完成
+2. 总结已发布在 Issue 下
+3. 回复 /gh {state.task_id} auto 即可启动修复，或 /gh {state.task_id} skip 跳过
+控制在 1-2 句话。"""
+            persona_msg = await self._engine_proxy.generate_raw(
+                prompt, inject_persona=True,
+                model=self._config.get("model", ""),
+            )
+            msg = persona_msg.strip() or f"#{state.issue_number} 信息已就绪，回复 /gh {state.task_id} auto 启动修复"
+        except Exception:
+            msg = f"#{state.issue_number}: {state.title}\n仓库: {state.repo}\n回复 /gh {state.task_id} auto 启动自动修复"
+
+        await self._adapter.send_private_message(admin_id, msg)
+        logger.info("Tracker: Issue #%d 已通知 developer 确认修复", state.issue_number)
 
     async def _notify_developer(self, state: IssueState, result: dict[str, Any]) -> None:
         from .webhook import _resolve_admin_id

@@ -47,15 +47,12 @@ def _launch_console_viewer(stream_file: Path, keep_open: bool = False) -> subpro
 
 
 async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> Path:
-    """准备本地工作区：Fork → Sync → Clone → 创建分支。"""
+    """准备本地工作区：Fork → Sync → Clone（每次全新）→ 创建分支。"""
     workspace_root = Path(config["workspace_dir"])
     task_dir = workspace_root / f"task_{issue_number}"
-    task_dir.mkdir(parents=True, exist_ok=True)
-
-    from .api import _resolve_github_username
+    from .api import _resolve_github_username, _write_token_for_repo
     from git import Repo
 
-    # github_username 从配置显式指定，空则 fallback 到仓库 owner
     username = _resolve_github_username(repo_name, config)
 
     # 1. Fork（幂等）
@@ -64,17 +61,24 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
     # 2. Sync upstream
     await sync_fork(repo_name, config)
 
-    # 3. Clone（PAT 来自插件写 token）
-    from .api import _write_token_for_repo
+    # 3. Clone（每次先删除旧目录，确保全新 clone）
+    import shutil
+    if task_dir.exists():
+        shutil.rmtree(task_dir, ignore_errors=True)
+    task_dir.mkdir(parents=True, exist_ok=True)
+
     pat = _write_token_for_repo(config, repo_name)
     fork_url = f"https://{pat}@github.com/{username}/{repo_name.split('/')[-1]}.git"
-    if not (task_dir / ".git").exists():
-        proc = await asyncio.create_subprocess_exec(
-            "git", "clone", fork_url, str(task_dir),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.wait()
+    proc = await asyncio.create_subprocess_exec(
+        "git", "clone", fork_url, str(task_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        err = stderr.decode()[:500] if stderr else "未知错误"
+        raise RuntimeError(f"git clone 失败 (exit={proc.returncode}): {err}")
+    logger.info("git clone 成功: %s → %s", repo_name, task_dir)
 
     # 4. 创建修复分支
     repo = Repo(task_dir)
@@ -108,7 +112,7 @@ def _tool_schema_text(tool_registry: ToolRegistry) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str:
+def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path, test_command: str = "pytest") -> str:
     """构建 Agent 的系统 Prompt。人格属性由 generate_raw(inject_persona=True) 自动注入。"""
     tool_schema = _tool_schema_text(tool_registry)
 
@@ -138,28 +142,30 @@ def build_system_prompt(tool_registry: ToolRegistry, workspace_dir: Path) -> str
 1. 先用 search_content 定位相关代码
 2. 用 read_file_chunk 查看上下文
 3. 用 search_and_replace_block 进行修改
-4. 修改完毕后先运行 run_local_test("flake8 .") 做静态检查
-5. 静态检查通过后运行 run_local_test("pytest") 做单元测试
-6. 如果任何检查失败，分析错误并继续修改"""
+4. 修改完毕后运行 run_local_test("{test_command}") 做验证
+5. 如果测试失败，分析错误并继续修改"""
 
 
 async def call_llm_with_tools(
     messages: list[dict],
     tool_registry: ToolRegistry,
     engine_proxy: Any,
+    workspace_dir: Path,
     stream: StreamWriter | None = None,
     config: dict | None = None,
 ) -> list[dict]:
-    """调用 LLM（prompt 中已嵌入工具定义），执行工具调用循环直到 LLM 输出 done。
+    """调用 LLM（prompt 中已嵌入工具定义），执行工具调用循环直到 LLM 输出 done 且产生代码变更。
 
+    当 LLM 宣布 done 但 git diff 为空时，自动注入警告并让 LLM 继续工作（最多 2 次）。
     返回增强后的 messages 列表。
     """
     max_tool_rounds = 15
     model = (config or {}).get("model", "") or None
+    no_change_count = 0
 
     for _round in range(max_tool_rounds):
         system_prompt = messages[0]["content"] if messages else ""
-        existing = messages[1:-1]  # system 之后、最后一条 user 之前的会话历史
+        existing = messages[1:-1]
         user_prompt = messages[-1]["content"] if messages else ""
 
         result_text = await engine_proxy.generate_raw(
@@ -174,19 +180,43 @@ async def call_llm_with_tools(
         if stream:
             stream.think(result_text)
 
-        # 尝试解析 JSON 工具调用
         tool_call = _parse_tool_call(result_text)
         if tool_call is None:
-            # 没有工具调用 → 视为 LLM 在思考/分析，进入验证阶段
             messages.append({"role": "assistant", "content": result_text})
             break
 
         if tool_call.get("status") == "done":
-            # LLM 宣布工作完成
             messages.append({"role": "assistant", "content": result_text})
-            break
+            # LLM 宣布完成 → 立刻检查是否有实际代码变更
+            diff_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--stat",
+                cwd=str(workspace_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            diff_stdout, _ = await diff_proc.communicate()
+            if diff_stdout.decode().strip():
+                break  # 有变更，真正完成
 
-        # 执行工具
+            # 无变更 → 警告 LLM 继续工作
+            no_change_count += 1
+            if no_change_count > 2:
+                logger.warning("LLM 连续 %d 次宣布完成但无代码变更，强制终止", no_change_count)
+                break
+
+            if stream:
+                stream.think("（LLM 宣布完成但未检测到代码变更，要求继续修复）")
+            messages.append({
+                "role": "user",
+                "content": (
+                    "⚠️ 警告：你声明了 done 但没有任何文件被修改。Issue 尚未被修复。"
+                    "请定位相关代码，使用 search_and_replace_block 进行实质性修改，"
+                    "确认修改完成后再输出 {\"status\": \"done\"}。"
+                    "不要在没有修改代码的情况下宣布完成。"
+                ),
+            })
+            continue
+
         tool_name = tool_call.get("tool", "")
         tool_args = tool_call.get("args", {})
         if stream:
@@ -196,7 +226,6 @@ async def call_llm_with_tools(
         if stream:
             stream.tool_result(tool_name, result_str)
 
-        # 将工具调用和结果加入消息历史
         messages.append({
             "role": "assistant",
             "content": f"调用工具 {tool_name}，参数：{json.dumps(tool_args, ensure_ascii=False)}",
@@ -298,7 +327,8 @@ async def run_agent_loop(
             "title": task_data["issue_title"],
             "body": task_data.get("issue_body", ""),
         }
-        system_prompt = build_system_prompt(tool_registry, workspace_dir)
+        test_command = config.get("test_command", "pytest")
+        system_prompt = build_system_prompt(tool_registry, workspace_dir, test_command)
         user_message = f"Issue #{issue_data['number']}: {issue_data['title']}\n\n{issue_data.get('body', '')}"
 
         stream.phase("ANALYSIS", "开始代码检索与定位...")
@@ -307,33 +337,35 @@ async def run_agent_loop(
             {"role": "user", "content": user_message},
         ]
 
-        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
+        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
 
-        # 验证阶段：flake8 → pytest，失败则重试
+        # ── 验证阶段：测试，失败则重试 ──
         max_retries = config.get("max_retries", 3)
         tests_passed = False
 
         for attempt in range(1, max_retries + 1):
             stream.phase("VALIDATION", f"第 {attempt} 轮验证")
 
-            lint_result = await _run_test_cmd("flake8 .", workspace_dir)
-            stream.test_run("flake8 .", lint_result["success"], lint_result.get("stdout", ""), lint_result.get("stderr", ""))
+            # 可选 lint 命令：仅当配置中给出非 pytest 的 lint 命令时运行
+            lint_cmd = config.get("lint_command", "")
+            if lint_cmd:
+                lint_result = await _run_test_cmd(lint_cmd, workspace_dir)
+                stream.test_run(lint_cmd, lint_result["success"], lint_result.get("stdout", ""), lint_result.get("stderr", ""))
+                if not lint_result["success"]:
+                    if attempt < max_retries:
+                        stream.retry(attempt, max_retries, lint_result.get("stderr", ""))
+                        messages.append({
+                            "role": "user",
+                            "content": f"静态检查失败（第{attempt}次）:\n{lint_result['stderr']}\n请修复代码风格/语法问题。",
+                        })
+                        messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
+                        continue
+                    stream.error("静态检查未通过，已达重试上限")
+                    stream.done(success=False, summary=f"{lint_cmd} 检查未通过")
+                    return "MAX_RETRIES_EXCEEDED"
 
-            if not lint_result["success"]:
-                if attempt < max_retries:
-                    stream.retry(attempt, max_retries, lint_result.get("stderr", ""))
-                    messages.append({
-                        "role": "user",
-                        "content": f"静态检查失败（第{attempt}次）:\n{lint_result['stderr']}\n请修复代码风格/语法问题。",
-                    })
-                    messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
-                    continue
-                stream.error("静态检查未通过，已达重试上限")
-                stream.done(success=False, summary="flake8 检查未通过")
-                return "MAX_RETRIES_EXCEEDED"
-
-            test_result = await _run_test_cmd(config.get("test_command", "pytest"), workspace_dir)
-            stream.test_run(config["test_command"], test_result["success"], test_result.get("stdout", ""), test_result.get("stderr", ""))
+            test_result = await _run_test_cmd(test_command, workspace_dir)
+            stream.test_run(test_command, test_result["success"], test_result.get("stdout", ""), test_result.get("stderr", ""))
 
             if test_result["success"]:
                 tests_passed = True
@@ -345,7 +377,7 @@ async def run_agent_loop(
                     "role": "user",
                     "content": f"测试失败（第{attempt}次）:\n{test_result['stderr']}\n请分析错误并修复。",
                 })
-                messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, stream, config)
+                messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
             else:
                 stream.error(f"达到最大重试次数 ({max_retries})，修复失败")
                 stream.done(success=False, summary="测试未通过，已达重试上限")
@@ -421,6 +453,11 @@ async def _finalize_and_create_pr(
 
     repo = Repo(workspace_dir)
     repo.git.add(".")
+
+    # 安全校验：无变更则不提交
+    diff_result = repo.git.diff("--cached", "--stat")
+    if not diff_result.strip():
+        raise RuntimeError("git diff 为空：Agent 未产生任何代码变更，拒绝创建空 PR")
 
     # 设置仓库级 git 用户身份，确保 GitHub 将提交归因于正确账户
     username = _resolve_github_username(repo_name, config)

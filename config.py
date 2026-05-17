@@ -27,6 +27,7 @@ class GithubAgentConfig:
     # ── Agent 循环 ──
     max_retries: int = 3
     test_command: str = "pytest"
+    lint_command: str = ""
     model: str = ""
     max_questions: int = 12
 
@@ -50,6 +51,7 @@ class GithubAgentConfig:
             "workspace_dir": str(self.workspace_dir),
             "max_retries": self.max_retries,
             "test_command": self.test_command,
+            "lint_command": self.lint_command,
             "model": self.model,
             "max_questions": self.max_questions,
             "auto_label": self.auto_label,
@@ -71,6 +73,7 @@ class GithubAgentConfig:
             workspace_dir=Path(data.get("workspace_dir", "data/github_workspace")),
             max_retries=int(data.get("max_retries", 3)),
             test_command=data.get("test_command", "pytest"),
+            lint_command=data.get("lint_command", ""),
             model=data.get("model", ""),
             max_questions=int(data.get("max_questions", 12)),
             auto_label=_parse_bool(data.get("auto_label", True)),

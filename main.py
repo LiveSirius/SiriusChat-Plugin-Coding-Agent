@@ -11,6 +11,7 @@ from sirius_chat.github.event_bridge import (
     register_comment_handler,
     register_issue_handler,
     register_pr_handler,
+    set_coding_bot_login,
     set_issue_repos,
 )
 from sirius_chat.plugins import PluginBase, PluginResponse
@@ -43,6 +44,7 @@ class CodingAgentPlugin(PluginBase):
         {"name": "max_retries", "type": "int", "description": "最大重试次数", "default": 3},
         {"name": "max_questions", "type": "int", "description": "信息收集最大追问次数", "default": 12},
         {"name": "test_command", "type": "string", "description": "测试命令", "default": "pytest"},
+        {"name": "lint_command", "type": "string", "description": "静态检查命令（留空跳过，如 flake8 .）", "default": ""},
         {"name": "auto_label", "type": "boolean", "description": "启用 Issue 自动标签", "default": True},
         {"name": "auto_review", "type": "boolean", "description": "启用 PR 自动审阅", "default": True},
         {"name": "auto_close_garbage", "type": "boolean", "description": "自动关闭垃圾 Issue/PR", "default": True},
@@ -82,6 +84,9 @@ class CodingAgentPlugin(PluginBase):
             return
 
         set_issue_repos(set(self._effective_repos))
+        if self._gh_config.github_username:
+            set_coding_bot_login(self._gh_config.github_username)
+            logger.info("coding bot login 已设置: %s", self._gh_config.github_username)
 
         config_dict = self._build_config_dict()
 
@@ -195,6 +200,7 @@ class CodingAgentPlugin(PluginBase):
             "github_email": self._gh_config.github_email,
             "admin_user_id": self._resolve_admin_id(),
             "model": self._gh_config.model,
+            "lint_command": self._gh_config.lint_command,
             "max_questions": self._gh_config.max_questions,
             "webhook_secret": self._monitor.webhook_secret,
             "auto_label": self._gh_config.auto_label,
@@ -254,6 +260,7 @@ class CodingAgentPlugin(PluginBase):
             "max_retries": self._gh_config.max_retries if self._gh_config else 3,
             "max_questions": self._gh_config.max_questions if self._gh_config else 12,
             "test_command": self._gh_config.test_command if self._gh_config else "pytest",
+            "lint_command": self._gh_config.lint_command if self._gh_config else "",
         }
 
         result = await handle_gh_command(

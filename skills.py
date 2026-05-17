@@ -73,20 +73,34 @@ def _validate_path(file_path: str) -> None:
 
 
 async def search_content(keyword: str, directory: str = ".") -> str:
-    """搜索关键词，返回文件路径与行号。"""
-    proc = await asyncio.create_subprocess_exec(
-        "rg", "-n", "--no-heading", keyword, directory,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return "搜索超时（>30秒）"
-    if proc.returncode not in (0, 1):
-        return f"搜索失败: {stderr.decode()}"
-    return stdout.decode() or "未找到匹配结果"
+    """搜索关键词，返回文件路径与行号。使用 Python 原生实现，无外部依赖。"""
+    base = Path(directory).resolve()
+    if not base.exists():
+        return f"搜索目录不存在: {directory}"
+    results: list[str] = []
+    noise_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".idea", ".vscode", ".mypy_cache", ".pytest_cache"}
+    for file_path in base.rglob("*"):
+        if not file_path.is_file():
+            continue
+        parts = set(file_path.parts) & noise_dirs
+        if parts:
+            continue
+        try:
+            if file_path.suffix and file_path.stat().st_size > 256_000:
+                continue
+        except OSError:
+            continue
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for line_no, line in enumerate(content.splitlines(), 1):
+            if keyword.lower() in line.lower():
+                rel = file_path.relative_to(base)
+                results.append(f"{rel}:{line_no}:{line[:200].strip()}")
+                if len(results) >= 50:
+                    return "\n".join(results) + "\n（结果已截断至 50 条）"
+    return "\n".join(results) if results else "未找到匹配结果"
 
 
 async def read_file_chunk(file_path: str, start_line: int, end_line: int) -> str:

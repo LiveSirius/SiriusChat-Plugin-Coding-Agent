@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .api import close_issue, close_pr
+from .api import close_issue, close_pr, is_issue_closed
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,14 @@ async def try_close_garbage_issue(
 ) -> bool:
     """分析 Issue 是否为垃圾内容，若是则生成人格化评论并关闭。
 
-    Returns True 如果已关闭，False 表示保留。
+    Returns True 如果已关闭或被关闭，False 表示保留。
     """
+    issue_number = issue_data.get("number", 0)
+    # 检查是否已被外部关闭
+    if await is_issue_closed(repo_name, issue_number, config):
+        logger.info("Issue #%d 已被外部关闭，跳过垃圾检测", issue_number)
+        return True
+
     result_text = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -66,8 +72,14 @@ async def try_close_garbage_pr(
 ) -> bool:
     """分析 PR 是否为垃圾内容，若是则生成人格化评论并关闭。
 
-    Returns True 如果已关闭，False 表示保留。
+    Returns True 如果已关闭或被关闭，False 表示保留。
     """
+    pr_number = pr_data.get("number", 0)
+    # 检查是否已被外部关闭（PR 状态通过 issue API 查询）
+    if await is_issue_closed(repo_name, pr_number, config):
+        logger.info("PR #%d 已被外部关闭，跳过垃圾检测", pr_number)
+        return True
+
     result_text = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
