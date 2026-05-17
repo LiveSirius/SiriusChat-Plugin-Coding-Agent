@@ -80,7 +80,24 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
             raise RuntimeError(f"git clone 失败 (exit={proc.returncode}): {err}")
         logger.info("git clone 成功: %s → %s", repo_name, task_dir)
     else:
-        logger.info("repo 已存在, 跳过 clone: %s", task_dir)
+        # 验证 .git 目录是否完整（上次 clone 可能中途失败留下残骸）
+        try:
+            Repo(task_dir)
+        except Exception:
+            logger.warning("repo 目录存在但 .git 损坏，删除后重新 clone: %s", task_dir)
+            import shutil
+            shutil.rmtree(task_dir, ignore_errors=True)
+            task_dir.mkdir(parents=True, exist_ok=True)
+            proc = await asyncio.create_subprocess_exec(
+                "git", "clone", fork_url, str(task_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                err = stderr.decode()[:500] if stderr else "未知错误"
+                raise RuntimeError(f"git clone 重试失败 (exit={proc.returncode}): {err}")
+            logger.info("git clone 成功（重试）: %s → %s", repo_name, task_dir)
 
     # 4. 创建修复分支
     repo = Repo(task_dir)
