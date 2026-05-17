@@ -531,9 +531,13 @@ async def run_agent_loop(
                 if not lint_result["success"]:
                     if attempt < max_retries:
                         stream.retry(attempt, max_retries, lint_result.get("stderr", ""))
+                        lint_failure = (
+                            (lint_result.get("stdout", "") + "\n" + lint_result.get("stderr", "")).strip()
+                            or "(无输出)"
+                        )
                         messages.append({
                             "role": "user",
-                            "content": f"静态检查失败（第{attempt}次）:\n{lint_result['stderr']}\n请修复代码风格/语法问题。",
+                            "content": f"静态检查失败（第{attempt}次）: {lint_failure}。请修复代码风格/语法问题。",
                         })
                         messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
                         continue
@@ -550,9 +554,16 @@ async def run_agent_loop(
 
             if attempt < max_retries:
                 stream.retry(attempt, max_retries, test_result.get("stderr", ""))
+                failure_output = (
+                    (test_result.get("stdout", "") + "\n" + test_result.get("stderr", "")).strip()
+                    or "(无输出)"
+                )
                 messages.append({
                     "role": "user",
-                    "content": f"测试失败（第{attempt}次）:\n{test_result['stderr']}\n请分析错误并修复。",
+                    "content": (
+                        f"测试失败（第{attempt}次），以下是完整输出:\n\n{failure_output}\n\n"
+                        "请分析以上测试失败的原因，搜索相关代码，用 search_and_replace_block 修复问题，然后调用 done 工具。"
+                    ),
                 })
                 messages = await call_llm_with_tools(messages, tool_registry, engine_proxy, workspace_dir, stream, config)
             else:
@@ -605,14 +616,14 @@ async def _run_test_cmd(test_command: str, workspace_dir: Path) -> dict:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
         except asyncio.TimeoutError:
             proc.kill()
-            return {"success": False, "stdout": "", "stderr": "测试超时（>60秒）"}
+            return {"success": False, "stdout": "", "stderr": "测试超时（>120秒）"}
         return {
             "success": proc.returncode == 0,
-            "stdout": stdout.decode(),
-            "stderr": stderr.decode(),
+            "stdout": stdout.decode(errors="replace")[-3000:],
+            "stderr": stderr.decode(errors="replace")[-2000:],
         }
     except FileNotFoundError:
         return {
