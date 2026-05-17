@@ -303,13 +303,25 @@ class IssueTracker:
                     from .api import add_labels_to_issue, remove_label_from_issue
                     to_add = [l for l in new_labels if l not in state.labels]
                     to_remove = [l for l in state.labels if l not in new_labels]
+                    remove_ok = True
                     for label in to_remove:
-                        await remove_label_from_issue(state.repo, state.issue_number, label, self._config)
-                        logger.debug("Tracker: Issue #%d 移除标签 %s", state.issue_number, label)
+                        ok = await remove_label_from_issue(state.repo, state.issue_number, label, self._config)
+                        if not ok:
+                            logger.warning("Tracker: Issue #%d 移除标签 %s 失败（HTTP非200）", state.issue_number, label)
+                            remove_ok = False
+                        else:
+                            logger.debug("Tracker: Issue #%d 移除标签 %s", state.issue_number, label)
+                    add_ok = True
                     if to_add:
-                        await add_labels_to_issue(state.repo, state.issue_number, to_add, self._config)
-                    state.labels = new_labels
-                    logger.info("Tracker: Issue #%d 标签变更: +%s -%s", state.issue_number, to_add, to_remove)
+                        add_ok = await add_labels_to_issue(state.repo, state.issue_number, to_add, self._config)
+                        if not add_ok:
+                            logger.warning("Tracker: Issue #%d 添加标签 %s 失败（HTTP非200）", state.issue_number, to_add)
+                    if remove_ok and add_ok:
+                        state.labels = new_labels
+                    logger.info("Tracker: Issue #%d 标签变更: +%s -%s (移除=%s 添加=%s)",
+                                state.issue_number, to_add, to_remove,
+                                "ok" if remove_ok else "失败",
+                                "ok" if add_ok else "失败")
             except Exception as exc:
                 logger.debug("Tracker: Issue #%d 标签调整失败: %s", state.issue_number, exc)
 

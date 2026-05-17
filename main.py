@@ -33,7 +33,7 @@ class CodingAgentPlugin(PluginBase):
     _plugin_display_name = "编码助手"
     _plugin_description = "GitHub Issue/PR 自动化管理 + Python 代码执行（事件由 github_monitor 驱动，Issue 信息后台自主收集）"
     _plugin_version = "2.2.0"
-    _plugin_author = "SiriusChat"
+    _plugin_author = "Sparrived/Sirius"
 
     _plugin_parameters = [
         {"name": "github_write_token", "type": "string", "description": "GitHub PAT（fork/PR/标签/评论），留空复用 monitor token"},
