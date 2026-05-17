@@ -63,22 +63,28 @@ async def prepare_workspace(repo_name: str, issue_number: int, config: dict) -> 
 
     # 3. Clone（每次先删除旧目录，确保全新 clone）
     import shutil
-    if task_dir.exists():
-        shutil.rmtree(task_dir, ignore_errors=True)
-    task_dir.mkdir(parents=True, exist_ok=True)
-
     pat = _write_token_for_repo(config, repo_name)
     fork_url = f"https://{pat}@github.com/{username}/{repo_name.split('/')[-1]}.git"
-    proc = await asyncio.create_subprocess_exec(
-        "git", "clone", fork_url, str(task_dir),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
+
+    for clone_attempt in range(1, 4):
+        if task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", fork_url, str(task_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            logger.info("git clone 成功: %s → %s", repo_name, task_dir)
+            break
         err = stderr.decode()[:500] if stderr else "未知错误"
+        if "already exists" in err.lower() and clone_attempt < 3:
+            logger.warning("git clone 目标存在残留文件，第%d次重试: %s", clone_attempt + 1, task_dir)
+            continue
         raise RuntimeError(f"git clone 失败 (exit={proc.returncode}): {err}")
-    logger.info("git clone 成功: %s → %s", repo_name, task_dir)
 
     # 4. 创建修复分支
     repo = Repo(task_dir)
